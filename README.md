@@ -4,14 +4,13 @@
 
 # Phi2ray
 
-**A small, careful Xray client for Windows.**
-One button to connect, a real kill switch, and settings you can actually understand.
+**An Xray client for Windows that tries hard not to leak.**
 
-[![Latest release](https://img.shields.io/github/v/release/YOUR_GITHUB_USERNAME/Phi2ray?label=release&color=6c5cf6)](https://github.com/YOUR_GITHUB_USERNAME/Phi2ray/releases/latest)
+[![Latest release](https://img.shields.io/github/v/release/Phoenix15049/Phi2ray?label=release&color=6c5cf6)](https://github.com/Phoenix15049/Phi2ray/releases/latest)
 ![Windows 10 / 11](https://img.shields.io/badge/Windows-10%20%7C%2011-1fb6d0)
 [![License: MIT](https://img.shields.io/badge/license-MIT-2ee6a6)](LICENSE)
 
-[Download](https://github.com/YOUR_GITHUB_USERNAME/Phi2ray/releases/latest) · [فارسی](README.fa.md)
+[Download](https://github.com/Phoenix15049/Phi2ray/releases/latest) · [فارسی](README.fa.md)
 
 <br />
 
@@ -25,125 +24,139 @@ One button to connect, a real kill switch, and settings you can actually underst
 
 ---
 
-## Why another client?
+## The short version
 
-I wanted something for myself that does a few things well. The clients I tried were either
-full of switches I didn't understand, or quietly did unsafe things: a SOCKS port open on
-`1080` for every app on the machine to find, DNS going straight to the ISP, the real network
-leaking for a few seconds every time the connection dropped.
+You paste a link, press the big button, and your whole PC goes through your server. If the
+connection drops, your traffic waits for it to come back instead of quietly going out over your
+real network. That's most of what Phi2ray is about.
 
-Phi2ray is the result. It's built on [Xray-core](https://github.com/XTLS/Xray-core) for the
-protocols and [sing-box](https://github.com/SagerNet/sing-box) for the system-wide VPN adapter,
-with a small Rust backend that ties them together and keeps an eye on them. The whole app is a
-single `.exe` of about 45 MB, with both cores inside.
+## Why I made it
 
-## What it does
+I use Xray configs every day, and I kept running into the same two problems with the clients
+out there. Some had so many options that I was never sure what I'd actually turned on. Others
+looked simple but did things I wasn't comfortable with once I looked closer: a SOCKS port sitting
+open on `1080` for any program to find, DNS lookups going straight to my ISP, and a few seconds
+of leaking every time the connection hiccuped.
+
+So I wrote my own. The heavy lifting is done by [Xray-core](https://github.com/XTLS/Xray-core)
+(the protocols) and [sing-box](https://github.com/SagerNet/sing-box) (the system-wide VPN adapter).
+Phi2ray is the part in between: a small Rust app that sets them up safely, watches them, and stays
+out of your way. It ships as one `.exe`, about 45 MB, with both cores inside.
+
+## What you get
 
 **Connecting**
 
-- Paste `vless://`, `vmess://`, `trojan://` or `ss://` links, or a base64 list. REALITY, XHTTP,
-  WebSocket, gRPC, HTTPUpgrade and TLS are all supported.
-- Subscriptions get their own tab, update on their own, and show how much traffic you've used
-  and how many days are left (when the provider reports it).
-- Group your own servers into tabs, test them all at once with a real request through each
-  server (not a TCP ping, which lies), and sort by delay.
-- Three modes: **VPN** (the whole system, through a virtual adapter), **System proxy**, or
-  **Proxy only** (local ports for apps you set up yourself).
+- Works with `vless://`, `vmess://`, `trojan://` and `ss://` links, plus base64 lists. REALITY,
+  XHTTP, WebSocket, gRPC, HTTPUpgrade and plain TLS all work.
+- Subscriptions sit in their own tab and refresh by themselves. If your provider shares it, you'll
+  see how much data you've used and how many days are left.
+- Put your own servers into groups, and test a whole group at once. The test sends a real request
+  through each server, so a server that's "up" but not actually working shows as failed instead
+  of getting a fake 1 ms.
+- Three ways to connect: **VPN** for the whole system, **System proxy** for browsers and apps
+  that follow Windows' proxy settings, or **Proxy only** if you'd rather point apps at it yourself.
 
-**Staying private**
+**Not leaking**
 
-- **Kill switch**, built on the Windows Filtering Platform. While it's on, nothing reaches the
-  internet except through the tunnel, even while reconnecting. If Phi2ray crashes, Windows
-  removes the rules by itself, so you never get locked out.
-- **Auto-reconnect** that doesn't drop the tunnel. If a core dies or traffic stops, only the
-  broken part restarts; your traffic waits instead of leaking.
-- DNS goes through the tunnel over DoH. You can pick from Cloudflare, Google, Quad9, AdGuard,
-  Mullvad and others, and test which one answers fastest from where you are.
-- Local proxy ports are random, and SOCKS always needs a username and password.
-- After connecting, the app checks that traffic really flows and shows the IP and country that
-  websites see.
+- **Kill switch.** It's a set of Windows firewall rules, not a timer that hopes for the best.
+  While it's on, nothing gets out except through the tunnel, including while it reconnects. If
+  Phi2ray ever crashes, Windows drops the rules on its own, so you can't end up locked out.
+- **Reconnecting without letting go.** When something breaks, only the broken piece restarts and
+  the tunnel stays up. Your apps wait a few seconds; they don't fall back to your real connection.
+- **DNS through the tunnel**, over HTTPS. Pick Cloudflare, Google, Quad9, AdGuard, Mullvad or
+  another one, and hit *Test* to see which answers fastest from where you are.
+- Local proxy ports are random each time, and SOCKS always asks for a username and password.
+- Once connected, it checks that traffic actually gets through and shows the IP and country that
+  websites see. If something's wrong you'll know right away, not after five minutes of loading
+  spinners.
 
-**Everyday use**
+**Day to day**
 
-- **Split tunnel**: choose apps (Telegram, games, anything running) and sites that skip the VPN,
-  or flip it around so only they use it.
-- Live upload and download speed, plus totals for the session.
-- Lives in the tray; minimizing hides it there, and closing while connected asks first.
-- Dark and light themes, English and Persian (right-to-left).
+- **Split tunnel.** Let some apps or sites skip the VPN (your bank, a game, a local site), or flip
+  it so only the ones you choose use it. You can pick apps straight from what's running.
+- Live download and upload speed, and how much you've used this session.
+- Sits in the tray. Minimizing hides it there, and if you close it while connected, it asks first.
+- Dark and light themes, and a full Persian interface.
 
 ## Getting started
 
-1. Download `Phi2ray.exe` from the [latest release](https://github.com/YOUR_GITHUB_USERNAME/Phi2ray/releases/latest).
-2. Run it. Windows will ask for administrator rights: VPN mode and the kill switch need them to
-   create the network adapter and firewall rules.
-3. Click **Add**, paste a link or a subscription URL, and press the power button.
+1. Grab `Phi2ray-<version>-windows-x64.exe` from the [latest release](https://github.com/Phoenix15049/Phi2ray/releases/latest).
+2. Run it. Windows will ask for administrator rights. That's needed to create the VPN adapter
+   and the firewall rules, and it's why Phi2ray doesn't run without it.
+3. Click **Add**, paste a link or your subscription URL, and press the power button.
 
-That's it. Everything else in Settings is optional.
+That's really all. Everything in Settings has a sensible default, so you only go there if you
+want to change something.
 
-> **Windows SmartScreen** may warn about an "unrecognized app" because the exe isn't code-signed
-> yet. Choose *More info → Run anyway*. You can check the file against the SHA-256 published with
-> each release.
+> **About the SmartScreen warning:** the exe isn't code-signed yet, so Windows may call it an
+> "unrecognized app". Click *More info → Run anyway*. If you want to be sure the file is the one
+> I published, compare its SHA-256 with the one in the release notes.
 
-Phi2ray needs the Microsoft Edge WebView2 runtime, which comes with Windows 10 and 11 by default.
+You'll also need the Microsoft Edge WebView2 runtime. It comes with Windows 10 and 11, so you
+almost certainly have it already.
 
-## How it works
+## Under the hood
 
 ```
- apps ──► Phi2ray VPN adapter (sing-box) ──► Xray ──► your server ──► internet
-                    │                          │
-                    └─ DNS over HTTPS ─────────┘
+ your apps ──► Phi2ray VPN adapter (sing-box) ──► Xray ──► your server ──► internet
+                          │                         │
+                          └──── DNS over HTTPS ─────┘
 ```
 
-- **sing-box** only owns the virtual adapter, the routes and DNS. Every connection is handed to
-  Xray's local SOCKS port, so every Xray transport works in VPN mode too.
-- **Xray** connects to your server. Its own connection is routed around the tunnel at the OS
-  level, so it can never loop back into it.
-- The **kill switch** is a set of firewall filters that allow only the tunnel, the two cores,
-  your local network (if you want) and DHCP.
-- Configs are passed to the cores over stdin, so your server credentials are never written to
-  disk in plain text. Saved servers and settings are encrypted with your Windows account (DPAPI).
-- The bundled cores are unpacked to `C:\ProgramData\Phi2ray`, a folder only administrators can
-  write to, and each one is checked against the hash recorded at build time before it runs.
+- **sing-box** only handles the virtual network adapter, routing and DNS. It hands every
+  connection to Xray, which means any transport Xray supports also works in VPN mode.
+- **Xray** talks to your server. Its own connection to the server is routed around the tunnel by
+  Windows itself, so it can't accidentally loop back into it.
+- The **kill switch** allows only the tunnel, the two cores, DHCP, and your local network if you
+  want printers and the router to stay reachable. Everything else is blocked.
+- Your server details are handed to the cores through stdin and never written to disk as plain
+  text. Saved servers and settings are encrypted with your Windows account (DPAPI).
+- The cores are unpacked into `C:\ProgramData\Phi2ray`, a folder only administrators can write
+  to, and each one is checked against the hash recorded at build time before it starts. Since
+  Phi2ray runs as admin, this stops other programs from swapping a core to get admin rights.
 
-There's no telemetry and no update check. The only requests Phi2ray makes on its own are the
-connection health check and the subscription updates you set up.
+There's no telemetry, no analytics and no update check. The only requests Phi2ray makes on its
+own are the connection check while you're connected and the subscription updates you added.
 
-## Building from source
+## Building it yourself
 
-You'll need [Rust](https://rustup.rs), [Node.js](https://nodejs.org) 20+, and the Visual Studio
-C++ build tools.
+You'll need [Rust](https://rustup.rs), [Node.js](https://nodejs.org) 20 or newer, and the Visual
+Studio C++ build tools.
 
 ```bash
-git clone https://github.com/YOUR_GITHUB_USERNAME/Phi2ray.git
+git clone https://github.com/Phoenix15049/Phi2ray.git
 cd Phi2ray
 npm install
 ```
 
-Then put the cores in `src-tauri/core/` (see [the note there](src-tauri/core/README.md)):
-`xray.exe`, `geoip.dat` and `geosite.dat` from the
-[Xray-core releases](https://github.com/XTLS/Xray-core/releases) (`Xray-windows-64.zip`), and
-`sing-box.exe` from the [sing-box releases](https://github.com/SagerNet/sing-box/releases)
-(`sing-box-<version>-windows-amd64.zip`).
+The cores aren't in the repo, so download them and drop them into `src-tauri/core/`
+([details](src-tauri/core/README.md)):
+
+- `xray.exe`, `geoip.dat` and `geosite.dat` from `Xray-windows-64.zip` on the
+  [Xray-core releases page](https://github.com/XTLS/Xray-core/releases)
+- `sing-box.exe` from `sing-box-<version>-windows-amd64.zip` on the
+  [sing-box releases page](https://github.com/SagerNet/sing-box/releases)
 
 ```bash
-# Run in development (from a terminal opened as administrator, for VPN mode)
+# Development (open the terminal as administrator if you want to try VPN mode)
 npm run tauri dev
 
-# Build the single-file release: src-tauri/target/release/phi2ray.exe
+# The single-file release, written to src-tauri/target/release/phi2ray.exe
 npm run build:exe
 ```
 
-`npm run dev` on its own opens the interface in a browser with fake data, which is handy for
-working on the UI without touching your network.
+If you only want to work on the interface, `npm run dev` opens it in a browser with fake data.
+Nothing touches your network that way.
 
 <details>
-<summary>Project layout</summary>
+<summary>Where things live</summary>
 
 ```
-src/                    React interface
+src/                    the interface (React)
 src-tauri/src/
-  connection.rs         connect, disconnect, and the supervisor that keeps the link alive
-  firewall.rs           the kill switch (Windows Filtering Platform)
+  connection.rs         connecting, disconnecting, and the watcher that keeps things alive
+  firewall.rs           the kill switch
   config.rs, tun.rs     Xray and sing-box configs
   split.rs              split tunnel rules
   parser.rs             share links and subscriptions
@@ -153,35 +166,37 @@ src-tauri/core/         Xray and sing-box binaries (not in git)
 ```
 </details>
 
-## Questions
+## Things people ask
 
-**Google shows my location as Iran, but other sites show the server's country.**
-That's almost always Google's own location database. It learns where IPs are from phones and
-Wi-Fi behind them, and many VPN servers used from Iran get tagged that way. If
-[ipleak.net](https://ipleak.net) and [browserleaks.com/webrtc](https://browserleaks.com/webrtc)
-show no Iranian IP or DNS server, nothing is leaking.
+**Google thinks I'm in Iran, but every other site shows the server's country.**
+That's Google's own location database, not a leak. It figures out where an IP is from the phones
+and Wi-Fi networks it sees behind it, and plenty of servers used from Iran end up tagged that way.
+If [ipleak.net](https://ipleak.net) and [browserleaks.com/webrtc](https://browserleaks.com/webrtc)
+don't show any Iranian IP or DNS server, you're fine.
 
-**It says "Connected" but nothing loads.**
-The status turns orange and says "No internet" when traffic isn't getting through. Set the log
-level to *Info* in Settings, reconnect, and look at the Logs: the reason is usually right there.
+**It says connected, but nothing loads.**
+When traffic isn't getting through, the button turns orange and says "No internet". Set the log
+level to *Info* in Settings, reconnect, and open Logs. The reason is usually sitting right there.
 
-**Split tunnelling for apps doesn't work in System proxy mode.**
-Right, only VPN mode can tell which app a connection comes from. Sites work in every mode.
+**Split tunnelling for apps doesn't do anything in System proxy mode.**
+That's expected. Only VPN mode can see which app a connection comes from. Sites work in every mode.
 
-**Some VLESS configs without TLS are rejected.**
-Recent Xray versions refuse unencrypted VLESS unless the server is on a private network. That's
-an Xray safety rule, not a Phi2ray one.
+**Some VLESS configs without TLS won't connect.**
+Newer Xray versions refuse unencrypted VLESS unless the server is on a private network. That's
+Xray protecting you, not something Phi2ray adds.
 
-## Credits
+## Thanks
 
-Phi2ray stands on the shoulders of [Xray-core](https://github.com/XTLS/Xray-core) (MPL-2.0),
+None of this would exist without [Xray-core](https://github.com/XTLS/Xray-core) (MPL-2.0),
 [sing-box](https://github.com/SagerNet/sing-box) (GPL-3.0) and [Tauri](https://tauri.app).
-See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for their licenses and where to get their
-source code.
+Their licenses and links to their source code are in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## License
 
-Phi2ray's own code is released under the [MIT License](LICENSE). The bundled cores keep their own
-licenses.
+Phi2ray's own code is under the [MIT License](LICENSE). The bundled cores keep their own licenses.
 
-Please use it responsibly and within the laws that apply to you.
+Use it responsibly, and within the laws that apply where you live.
+
+If you run into a bug or have an idea, [open an issue](https://github.com/Phoenix15049/Phi2ray/issues).
+I read them all.
