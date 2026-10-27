@@ -7,7 +7,7 @@
 **یک کلاینت Xray کوچک و حساب‌شده برای ویندوز.**
 یک دکمه برای اتصال، کیل‌سوئیچ واقعی، و تنظیماتی که می‌شود فهمید.
 
-[دانلود](https://github.com/YOUR_GITHUB_USERNAME/Phi2ray/releases/latest) · [English](README.md)
+[دانلود](https://github.com/Phoenix15049/Phi2ray/releases/latest) · [English](README.md)
 
 <br />
 
@@ -67,7 +67,7 @@ Phi2ray نتیجه‌ی همین است. پروتکل‌ها را [Xray-core](ht
 
 ## شروع
 
-۱. فایل `Phi2ray.exe` را از [آخرین نسخه](https://github.com/YOUR_GITHUB_USERNAME/Phi2ray/releases/latest) دانلود کنید.
+۱. فایل `Phi2ray.exe` را از [آخرین نسخه](https://github.com/Phoenix15049/Phi2ray/releases/latest) دانلود کنید.
 ۲. اجرایش کنید. ویندوز دسترسی ادمین می‌خواهد، چون حالت VPN و کیل‌سوئیچ برای ساختن کارت شبکه و
 قوانین فایروال به آن نیاز دارند.
 ۳. روی **افزودن** بزنید، لینک یا آدرس ساب‌اسکریپشن را paste کنید و دکمه‌ی پاور را بزنید.
