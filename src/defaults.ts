@@ -1,0 +1,30 @@
+import type { Settings } from "./api";
+
+/** Mirrors `Settings::default()` in the Rust backend. */
+export const DEFAULT_SETTINGS: Settings = {
+  version: 2,
+  mode: "tun",
+  selected: null,
+  autoConnect: false,
+  killSwitch: true,
+  autoReconnect: true,
+  bypassLan: true,
+  iranDirect: false,
+  blockAds: false,
+  blockQuic: true,
+  split: { enabled: false, mode: "exclude", apps: [], sites: [] },
+  remoteDns: "https://1.1.1.1/dns-query",
+  ipv6: false,
+  tunStack: "mixed",
+  tunMtu: 9000,
+  strictRoute: true,
+  fixedPorts: false,
+  socksPort: 10808,
+  httpPort: 10809,
+  logLevel: "warning",
+  testUrl: "http://www.gstatic.com/generate_204",
+  language: "en",
+  theme: "system",
+  alwaysOnTop: false,
+  minimizeToTray: true,
+};

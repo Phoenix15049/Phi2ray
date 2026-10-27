@@ -1,0 +1,147 @@
+//! Windows helpers: tie child processes to the app's lifetime, administrator elevation,
+//! and the list of running apps for split tunnelling.
+
+/// A running program, offered when adding apps to the split tunnel.
+#[derive(serde::Serialize, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RunningApp {
+    pub name: String,
+    pub path: String,
+}
+
+#[cfg(windows)]
+mod imp {
+    use std::ffi::{c_void, OsStr};
+    use std::os::windows::ffi::OsStrExt;
+    use std::ptr::{null, null_mut};
+    use std::sync::OnceLock;
+
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    /// The job handle, stored as usize because raw handles are not Send/Sync.
+    static JOB: OnceLock<usize> = OnceLock::new();
+
+    fn job() -> HANDLE {
+        *JOB.get_or_init(|| unsafe {
+            let job = CreateJobObjectW(null(), null());
+            if !job.is_null() {
+                let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+                info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                SetInformationJobObject(
+                    job,
+                    JobObjectExtendedLimitInformation,
+                    &info as *const _ as *const c_void,
+                    std::mem::size_of_val(&info) as u32,
+                );
+            }
+            job as usize
+        }) as HANDLE
+    }
+
+    /// Windows kills every process in our job when Phi2ray exits, even after a crash,
+    /// so no orphaned core keeps tunnelling traffic.
+    pub fn bind_to_app(process: *mut c_void) {
+        let job = job();
+        if !job.is_null() {
+            unsafe { AssignProcessToJobObject(job, process) };
+        }
+    }
+
+    pub fn is_elevated() -> bool {
+        unsafe {
+            let mut token: HANDLE = null_mut();
+            if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+                return false;
+            }
+            let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
+            let mut len = 0u32;
+            let ok = GetTokenInformation(
+                token,
+                TokenElevation,
+                &mut elevation as *mut _ as *mut c_void,
+                std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+                &mut len,
+            );
+            CloseHandle(token);
+            ok != 0 && elevation.TokenIsElevated != 0
+        }
+    }
+
+    /// Programs currently running, one entry per executable, without Windows' own components.
+    pub fn running_apps() -> Vec<super::RunningApp> {
+        use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+        };
+        use windows_sys::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION};
+
+        let mut apps = Vec::new();
+        unsafe {
+            let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            if snapshot.is_null() || snapshot as isize == -1 {
+                return apps;
+            }
+            let mut entry: PROCESSENTRY32W = std::mem::zeroed();
+            entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+            let mut more = Process32FirstW(snapshot, &mut entry) != 0;
+            while more {
+                let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, entry.th32ProcessID);
+                if !process.is_null() {
+                    let mut buf = [0u16; 1024];
+                    let mut len = buf.len() as u32;
+                    if QueryFullProcessImageNameW(process, 0, buf.as_mut_ptr(), &mut len) != 0 {
+                        let path = String::from_utf16_lossy(&buf[..len as usize]);
+                        let name = path.rsplit('\\').next().unwrap_or(&path).to_string();
+                        apps.push(super::RunningApp { name, path });
+                    }
+                    CloseHandle(process);
+                }
+                more = Process32NextW(snapshot, &mut entry) != 0;
+            }
+            CloseHandle(snapshot);
+        }
+        let windows_dir = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into()).to_ascii_lowercase();
+        apps.retain(|a| !a.path.to_ascii_lowercase().starts_with(&windows_dir));
+        apps.sort_by(|a, b| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()).then(a.path.cmp(&b.path)));
+        apps.dedup_by(|a, b| a.path.eq_ignore_ascii_case(&b.path));
+        apps
+    }
+
+    /// Starts a new elevated instance (UAC prompt). The caller should then exit.
+    pub fn relaunch_as_admin() -> Result<(), String> {
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let wide = |s: &OsStr| s.encode_wide().chain(Some(0)).collect::<Vec<u16>>();
+        let verb = wide(OsStr::new("runas"));
+        let file = wide(exe.as_os_str());
+        let result = unsafe { ShellExecuteW(null_mut(), verb.as_ptr(), file.as_ptr(), null(), null(), SW_SHOWNORMAL) };
+        // ShellExecute returns a value greater than 32 on success.
+        if result as isize > 32 {
+            Ok(())
+        } else {
+            Err("Administrator permission was not granted.".into())
+        }
+    }
+}
+
+#[cfg(not(windows))]
+mod imp {
+    pub fn is_elevated() -> bool {
+        true
+    }
+
+    pub fn relaunch_as_admin() -> Result<(), String> {
+        Err("Run Phi2ray with sudo to use VPN mode.".into())
+    }
+
+    pub fn running_apps() -> Vec<super::RunningApp> {
+        Vec::new()
+    }
+}
+
+pub use imp::*;

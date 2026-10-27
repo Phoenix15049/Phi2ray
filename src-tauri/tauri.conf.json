@@ -1,0 +1,49 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Phi2ray",
+  "version": "0.1.0",
+  "identifier": "com.phi2ray.app",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Phi2ray",
+        "width": 420,
+        "height": 560,
+        "minWidth": 420,
+        "maxWidth": 420,
+        "minHeight": 520,
+        "maxHeight": 720,
+        "maximizable": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src ipc: http://ipc.localhost"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "resources": {
+      "core/*": "core/"
+    },
+    "publisher": "M.R. Yadollahi",
+    "copyright": "Copyright © 2026 M.R. Yadollahi. MIT License.",
+    "category": "Utility",
+    "shortDescription": "Secure Xray client with VPN mode, kill switch and split tunnelling",
+    "longDescription": "Phi2ray is a small, careful Xray client for Windows. It connects to VLESS, VMess, Trojan and Shadowsocks servers (REALITY, XHTTP, WebSocket, gRPC and more), routes the whole system through a VPN adapter or works as a proxy, and protects against leaks with a firewall-based kill switch."
+  }
+}

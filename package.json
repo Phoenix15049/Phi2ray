@@ -1,0 +1,33 @@
+{
+  "name": "phi2ray",
+  "private": true,
+  "version": "0.1.0",
+  "description": "A small, careful Xray client for Windows: VPN mode, kill switch, split tunnelling and subscriptions.",
+  "author": "M.R. Yadollahi",
+  "license": "MIT",
+  "homepage": "https://github.com/YOUR_GITHUB_USERNAME/Phi2ray",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/YOUR_GITHUB_USERNAME/Phi2ray.git"
+  },
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "tauri": "tauri",
+    "build:exe": "tauri build --no-bundle --features embed-cores"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.0.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "typescript": "^5.5.4",
+    "vite": "^5.4.0"
+  }
+}
