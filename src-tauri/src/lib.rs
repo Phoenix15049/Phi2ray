@@ -525,6 +525,14 @@ fn relaunch_as_admin(app: AppHandle) -> Result<(), String> {
 
 /// Checks a core's hash once per file version instead of re-reading it on every use.
 fn verify_cached(state: &AppState, exe: &Path) -> Result<(), String> {
+    if cores::EMBEDDED {
+        // Verified at startup and locked against changes since, so nothing to re-check.
+        return if cores::trusted(exe) {
+            Ok(())
+        } else {
+            Err(format!("{} didn't pass the integrity check. Restart Phi2ray.", exe.display()))
+        };
+    }
     let meta = std::fs::metadata(exe).map_err(|e| format!("Cannot read {}: {e}", exe.display()))?;
     let stamp = (meta.modified().ok(), meta.len());
     if state.verified.lock().unwrap().get(exe) == Some(&stamp) {
@@ -584,18 +592,20 @@ pub fn run() {
             };
             let logs: Logs = Arc::new(Mutex::new(VecDeque::new()));
             // Single-exe builds unpack their cores first; other builds use the core folder.
+            // When unpacking fails they run no core at all: never one found next to the exe,
+            // where anyone could have put it.
             let mut paths = paths;
-            let core_error = match cores::install() {
-                Ok(Some(dir)) => {
+            let core_error = match cores::target_dir() {
+                None => None,
+                Some(Ok(dir)) => {
                     paths.core = dir;
-                    None
+                    cores::install(&paths.core).err()
                 }
-                Ok(None) => None,
-                Err(e) => {
-                    logs.lock().unwrap().push_back(format!("[app] {e}"));
-                    Some(e)
-                }
+                Some(Err(e)) => Some(e),
             };
+            if let Some(e) = &core_error {
+                logs.lock().unwrap().push_back(format!("[app] {e}"));
+            }
             // Recover the user's proxy settings if we crashed while connected.
             let _ = proxy::restore(&paths.proxy_marker);
             app.manage(AppState {

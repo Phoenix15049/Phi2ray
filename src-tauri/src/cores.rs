@@ -1,24 +1,52 @@
 //! Single-exe releases (`--features embed-cores`) carry xray, sing-box and their data files
-//! inside Phi2ray.exe. On start they're unpacked to a folder only administrators can write to,
-//! and every file is checked against the hash recorded at build time.
+//! inside Phi2ray.exe. On start they're unpacked to `Program Files\Phi2ray`, checked against
+//! the hashes recorded at build time, and kept open with writing blocked until Phi2ray exits.
 //!
-//! Why that folder matters: Phi2ray runs elevated and starts these programs elevated too, so a
-//! user-writable location would let any unprivileged program swap xray.exe and gain admin rights.
+//! Why this matters: Phi2ray runs elevated and starts these programs elevated too, so anyone
+//! able to swap one of them would gain admin rights.
+//! - Program Files only lets administrators create or change folders, so nobody else can
+//!   create the folder first, plant a link in its place, or keep write access to it.
+//! - Its location comes from the system (a known folder), not from environment variables,
+//!   which any user can redefine for their own programs.
+//! - Holding the files open without write or delete sharing means the bytes that passed the
+//!   hash check are the bytes that run, every time, with no re-check race.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-/// Where the cores were unpacked, or None for builds that don't embed them.
-pub fn install() -> Result<Option<PathBuf>, String> {
-    imp::install()
+pub use imp::EMBEDDED;
+
+/// Where single-exe builds keep their cores, or None for builds that use a core folder.
+pub fn target_dir() -> Option<Result<PathBuf, String>> {
+    imp::target_dir()
+}
+
+/// Unpacks (when needed), verifies and locks every embedded file in `dir`.
+pub fn install(dir: &Path) -> Result<(), String> {
+    imp::install(dir)
+}
+
+/// Whether `exe` is one of the verified, locked files. Single-exe builds run nothing else.
+pub fn trusted(exe: &Path) -> bool {
+    imp::trusted(exe)
 }
 
 #[cfg(feature = "embed-cores")]
 mod imp {
-    use std::fs;
+    use std::fs::{self, File};
+    use std::io::Read;
+    use std::os::windows::fs::OpenOptionsExt;
     use std::path::{Path, PathBuf};
-    use std::process::Command;
+    use std::ptr::null_mut;
+    use std::sync::Mutex;
 
     use sha2::{Digest, Sha256};
+    use windows_sys::Win32::System::Com::CoTaskMemFree;
+    use windows_sys::Win32::UI::Shell::{FOLDERID_ProgramFiles, SHGetKnownFolderPath, KF_FLAG_DEFAULT};
+
+    pub const EMBEDDED: bool = true;
+
+    /// Others may read (and run) the file, but not write, rename or delete it.
+    const FILE_SHARE_READ: u32 = 0x1;
 
     pub struct EmbeddedFile {
         pub name: &'static str,
@@ -28,68 +56,91 @@ mod imp {
 
     include!(concat!(env!("OUT_DIR"), "/embedded_cores.rs"));
 
-    pub fn install() -> Result<Option<PathBuf>, String> {
-        let program_data = std::env::var_os("ProgramData").unwrap_or_else(|| "C:\\ProgramData".into());
-        let dir = Path::new(&program_data).join("Phi2ray").join(format!("core-{}", env!("CARGO_PKG_VERSION")));
-        fs::create_dir_all(&dir).map_err(|e| format!("Cannot create {}: {e}", dir.display()))?;
-        lock_down(&dir)?;
+    /// Verified files and their open handles, held for the app's lifetime.
+    static LOCKED: Mutex<Vec<(PathBuf, File)>> = Mutex::new(Vec::new());
 
-        for file in FILES {
-            let path = dir.join(file.name);
-            let intact = fs::read(&path).map(|bytes| hex::encode(Sha256::digest(&bytes)) == file.sha256).unwrap_or(false);
-            if !intact {
-                let data = zstd::decode_all(file.data).map_err(|e| format!("Cannot unpack {}: {e}", file.name))?;
-                let tmp = dir.join(format!("{}.tmp", file.name));
-                // Remove anything planted under this name first (a link would redirect the write).
-                let _ = fs::remove_file(&tmp);
-                fs::write(&tmp, &data).map_err(|e| format!("Cannot write {}: {e}", tmp.display()))?;
-                fs::rename(&tmp, &path).map_err(|e| format!("Cannot replace {}: {e}", path.display()))?;
-            }
-            // The hash pin makes every later start of this core re-check it (see xray::verify).
-            let pin = dir.join(format!("{}.sha256", file.name));
-            let _ = fs::remove_file(&pin);
-            fs::write(&pin, file.sha256).map_err(|e| format!("Cannot write {}: {e}", pin.display()))?;
-        }
-        Ok(Some(dir))
+    pub fn target_dir() -> Option<Result<PathBuf, String>> {
+        let dir = program_files()
+            .map(|p| p.join("Phi2ray").join(format!("core-{}", env!("CARGO_PKG_VERSION"))))
+            .ok_or_else(|| "Cannot find the Program Files folder.".to_string());
+        Some(dir)
     }
 
-    /// Owner: Administrators. Write: Administrators and SYSTEM only. Everyone else: read/run.
-    /// Inheritance from ProgramData (where any user may create files) is removed.
-    fn lock_down(dir: &Path) -> Result<(), String> {
-        let icacls = |target: &Path, args: &[&str]| -> Result<(), String> {
-            let mut cmd = Command::new("icacls");
-            cmd.arg(target).args(args);
-            {
-                use std::os::windows::process::CommandExt;
-                cmd.creation_flags(crate::xray::CREATE_NO_WINDOW);
-            }
-            let out = cmd.output().map_err(|e| format!("icacls failed: {e}"))?;
-            if out.status.success() {
-                Ok(())
-            } else {
-                Err(format!("Cannot secure {}: {}", dir.display(), String::from_utf8_lossy(&out.stdout).trim()))
-            }
-        };
-        // Take ownership of the folder and anything already in it (someone else may have planted files).
-        icacls(dir, &["/setowner", "*S-1-5-32-544", "/T", "/C", "/Q"])?;
-        // The rules go on the folder only. Its (OI)(CI) flags make files inherit them; applied to
-        // files directly they don't work and leave the files unreadable even for administrators.
-        icacls(
-            dir,
-            &["/inheritance:r", "/grant:r", "*S-1-5-32-544:(OI)(CI)F", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-545:(OI)(CI)RX", "/Q"],
-        )?;
-        // Existing files go back to inheriting from the folder (this also repairs files left
-        // unreadable by earlier versions). Fails harmlessly when the folder is still empty.
-        let _ = icacls(&dir.join("*"), &["/reset", "/C", "/Q"]);
+    pub fn install(dir: &Path) -> Result<(), String> {
+        fs::create_dir_all(dir).map_err(|e| format!("Cannot create {}: {e}", dir.display()))?;
+        let mut locked = LOCKED.lock().unwrap();
+        locked.clear();
+        for file in FILES {
+            let path = dir.join(file.name);
+            let handle = match lock_verified(&path, file) {
+                Ok(handle) => handle,
+                Err(_) => {
+                    unpack(dir, file)?;
+                    lock_verified(&path, file)?
+                }
+            };
+            locked.push((path, handle));
+        }
         Ok(())
+    }
+
+    pub fn trusted(exe: &Path) -> bool {
+        LOCKED.lock().unwrap().iter().any(|(path, _)| path == exe)
+    }
+
+    /// Opens `path` with writing blocked, then checks the content through that same handle.
+    fn lock_verified(path: &Path, file: &EmbeddedFile) -> Result<File, String> {
+        let mut handle = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(path)
+            .map_err(|e| format!("Cannot open {}: {e}", path.display()))?;
+        let mut bytes = Vec::new();
+        handle.read_to_end(&mut bytes).map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
+        if hex::encode(Sha256::digest(&bytes)) != file.sha256 {
+            return Err(format!("{} failed its integrity check", file.name));
+        }
+        Ok(handle)
+    }
+
+    fn unpack(dir: &Path, file: &EmbeddedFile) -> Result<(), String> {
+        let data = zstd::decode_all(file.data).map_err(|e| format!("Cannot unpack {}: {e}", file.name))?;
+        let tmp = dir.join(format!("{}.tmp", file.name));
+        let _ = fs::remove_file(&tmp);
+        fs::write(&tmp, &data).map_err(|e| format!("Cannot write {}: {e}", tmp.display()))?;
+        let path = dir.join(file.name);
+        fs::rename(&tmp, &path).map_err(|e| format!("Cannot replace {}: {e}", path.display()))
+    }
+
+    /// `C:\Program Files`, as registered with the system.
+    fn program_files() -> Option<PathBuf> {
+        let mut raw = null_mut();
+        let hr = unsafe { SHGetKnownFolderPath(&FOLDERID_ProgramFiles, KF_FLAG_DEFAULT as _, null_mut(), &mut raw) };
+        let path = (hr >= 0 && !raw.is_null()).then(|| {
+            let len = (0..).take_while(|&i| unsafe { *raw.add(i) } != 0).count();
+            PathBuf::from(String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(raw, len) }))
+        });
+        unsafe { CoTaskMemFree(raw as _) };
+        path.filter(|p| p.is_absolute())
     }
 }
 
 #[cfg(not(feature = "embed-cores"))]
 mod imp {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
-    pub fn install() -> Result<Option<PathBuf>, String> {
-        Ok(None)
+    pub const EMBEDDED: bool = false;
+
+    pub fn target_dir() -> Option<Result<PathBuf, String>> {
+        None
+    }
+
+    pub fn install(_dir: &Path) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// Builds without embedded cores check them with the `.sha256` pins instead (see `xray::verify`).
+    pub fn trusted(_exe: &Path) -> bool {
+        true
     }
 }

@@ -194,6 +194,9 @@ pub fn connect(app: &AppHandle, state: &AppState, id: &str) -> Result<Session, S
         None => profile,
     };
 
+    // Whether the kill switch was already protecting the user (connected, or holding the
+    // internet blocked). A failed switch to another server must not drop that protection.
+    let was_protected = firewall::is_active();
     if settings.kill_switch {
         firewall::enable(&firewall_rules(state, &settings))?;
         log(state, "[app] Kill switch on");
@@ -219,11 +222,18 @@ pub fn connect(app: &AppHandle, state: &AppState, id: &str) -> Result<Session, S
             Ok(session)
         }
         Err(e) => {
-            // A failed manual connect leaves the network as it was before Phi2ray touched it.
             state.core.lock().unwrap().stop();
             let _ = proxy::restore(&state.paths.proxy_marker);
-            firewall::disable();
             log(state, format!("[app] Connect failed: {e}"));
+            if settings.kill_switch && was_protected {
+                // The previous connection is already gone: keep blocking until the user
+                // reconnects or chooses to unblock.
+                state.blocked.store(true, Ordering::SeqCst);
+                log(state, "[app] The kill switch keeps blocking the internet until you reconnect or disconnect.");
+            } else {
+                // A failed connect from idle leaves the network as it was before.
+                firewall::disable();
+            }
             Err(e)
         }
     }
@@ -496,6 +506,12 @@ fn restart(state: &AppState, xray: bool, tun: bool) -> Result<(), String> {
         let link = link.as_ref().ok_or("Not connected.")?;
         (link.xray_cfg.clone(), link.tun_cfg.clone(), link.session.socks_port)
     };
+    if xray {
+        crate::verify_cached(state, &state.paths.xray())?;
+    }
+    if tun && tun_cfg.is_some() {
+        crate::verify_cached(state, &state.paths.sing_box())?;
+    }
     let mut core = state.core.lock().unwrap();
     if xray {
         core.start_xray(&state.paths.xray(), &state.paths.core, &xray_cfg, socks_port)?;

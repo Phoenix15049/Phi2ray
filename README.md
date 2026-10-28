@@ -112,8 +112,9 @@ almost certainly have it already.
   want printers and the router to stay reachable. Everything else is blocked.
 - Your server details are handed to the cores through stdin and never written to disk as plain
   text. Saved servers and settings are encrypted with your Windows account (DPAPI).
-- The cores are unpacked into `C:\ProgramData\Phi2ray`, a folder only administrators can write
-  to, and each one is checked against the hash recorded at build time before it starts. Since
+- The cores are unpacked into `C:\Program Files\Phi2ray`, where only administrators can create
+  or change anything. Each file is checked against the hash recorded at build time and then kept
+  open with writing blocked until Phi2ray exits, so what runs is exactly what was checked. Since
   Phi2ray runs as admin, this stops other programs from swapping a core to get admin rights.
 
 There's no telemetry, no analytics and no update check. The only requests Phi2ray makes on its
