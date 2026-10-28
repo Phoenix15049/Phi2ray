@@ -13,6 +13,11 @@ pub struct Inbounds {
     pub socks_pass: String,
     /// Localhost port for xray's traffic counters (`/debug/vars`).
     pub metrics_port: u16,
+    /// Password-protected HTTP inbound used only by Phi2ray's own checks. It always goes
+    /// to the server, whatever the split tunnel says.
+    pub probe_port: u16,
+    pub probe_user: String,
+    pub probe_pass: String,
 }
 
 /// Which optional data files are next to xray.
@@ -37,7 +42,10 @@ pub fn build(p: &Profile, inb: &Inbounds, s: &Settings, assets: &Assets) -> Valu
     let sniffing = json!({ "enabled": true, "destOverride": ["http", "tls", "quic"], "routeOnly": true });
 
     // The metrics inbound must reach xray's stats endpoint, never the internet.
-    let mut rules = vec![json!({ "type": "field", "inboundTag": ["metrics-in"], "outboundTag": "metrics" })];
+    let mut rules = vec![
+        json!({ "type": "field", "inboundTag": ["metrics-in"], "outboundTag": "metrics" }),
+        json!({ "type": "field", "inboundTag": ["probe-in"], "outboundTag": "proxy" }),
+    ];
 
     // In VPN mode sing-box does the split (it also sees apps); here only for the proxy modes.
     let split = if s.mode == Mode::Tun { None } else { s.split.rules().filter(|r| r.has_sites()) };
@@ -122,6 +130,13 @@ pub fn build(p: &Profile, inb: &Inbounds, s: &Settings, assets: &Assets) -> Valu
                 "protocol": "http",
                 "settings": {},
                 "sniffing": sniffing
+            },
+            {
+                "tag": "probe-in",
+                "listen": "127.0.0.1",
+                "port": inb.probe_port,
+                "protocol": "http",
+                "settings": { "accounts": [{ "user": inb.probe_user, "pass": inb.probe_pass }] }
             }
         ],
         "outbounds": [
@@ -227,7 +242,16 @@ mod tests {
     use crate::parser::parse_link;
 
     fn inbounds() -> Inbounds {
-        Inbounds { socks_port: 10801, http_port: 10802, socks_user: "u".into(), socks_pass: "p".into(), metrics_port: 10803 }
+        Inbounds {
+            socks_port: 10801,
+            http_port: 10802,
+            socks_user: "u".into(),
+            socks_pass: "p".into(),
+            metrics_port: 10803,
+            probe_port: 10804,
+            probe_user: "pu".into(),
+            probe_pass: "pp".into(),
+        }
     }
 
     /// Every optional routing feature on, at the most verbose log level.
@@ -244,9 +268,10 @@ mod tests {
         assert_eq!(out["streamSettings"]["realitySettings"]["publicKey"], "K");
         assert_eq!(out["streamSettings"]["grpcSettings"]["serviceName"], "svc");
         assert!(c["inbounds"].as_array().unwrap().iter().all(|i| i["listen"] == "127.0.0.1"));
-        // Defaults: metrics, QUIC block and LAN bypass only, and no access log.
-        assert_eq!(c["routing"]["rules"].as_array().unwrap().len(), 3);
+        // Defaults: metrics, probe, QUIC block and LAN bypass only, and no access log.
+        assert_eq!(c["routing"]["rules"].as_array().unwrap().len(), 4);
         assert_eq!(c["routing"]["rules"][0]["outboundTag"], "metrics");
+        assert_eq!(c["routing"]["rules"][1]["outboundTag"], "proxy");
         assert_eq!(c["inbounds"][0]["port"], 10803);
         assert_eq!(c["log"]["access"], "none");
     }
@@ -255,8 +280,8 @@ mod tests {
     fn optional_rules_need_their_data_files() {
         let p = parse_link("trojan://pw@a.com:443").unwrap();
         let rules = |assets| build(&p, &inbounds(), &everything_on(), &assets)["routing"]["rules"].as_array().unwrap().len();
-        assert_eq!(rules(Assets { geoip: true, geosite: true }), 6);
-        assert_eq!(rules(Assets { geoip: false, geosite: false }), 4);
+        assert_eq!(rules(Assets { geoip: true, geosite: true }), 7);
+        assert_eq!(rules(Assets { geoip: false, geosite: false }), 5);
     }
 
     fn sample_split(mode: crate::split::SplitMode) -> crate::split::SplitTunnel {
@@ -274,9 +299,11 @@ mod tests {
         let assets = Assets { geoip: false, geosite: false };
         let include = Settings { mode: Mode::System, split: sample_split(crate::split::SplitMode::Include), ..Settings::default() };
         let rules = build(&p, &inbounds(), &include, &assets)["routing"]["rules"].as_array().unwrap().clone();
-        assert_eq!(rules[1]["domain"][0], "domain:digikala.com");
-        assert_eq!(rules[1]["outboundTag"], "proxy");
+        assert_eq!(rules[2]["domain"][0], "domain:digikala.com");
+        assert_eq!(rules[2]["outboundTag"], "proxy");
         assert_eq!(rules.last().unwrap()["outboundTag"], "direct");
+        // Phi2ray's own checks still reach the server, before any split rule.
+        assert_eq!(rules[1]["inboundTag"][0], "probe-in");
         // In VPN mode sing-box does the split, so xray gets no split rules.
         let vpn = Settings { mode: Mode::Tun, ..include };
         let rules = build(&p, &inbounds(), &vpn, &assets)["routing"]["rules"].as_array().unwrap().clone();

@@ -4,6 +4,7 @@ import logo from "./assets/logo.svg";
 import { DEFAULT_SETTINGS } from "./defaults";
 import { AddKind, AddSheet, GroupSheet, looksLikeSubscription } from "./GroupSheets";
 import { I18n, makeT, StringKey } from "./i18n";
+import { InfoSheet } from "./InfoSheet";
 import { modeOptions, SettingsSheet } from "./SettingsSheet";
 import { SplitSheet } from "./SplitSheet";
 import {
@@ -21,7 +22,7 @@ import {
 } from "./ui";
 
 type Phase = "idle" | "connecting" | "connected" | "reconnecting" | "disconnecting";
-type SheetName = "add" | "settings" | "split" | "logs" | "admin" | "group" | "quit" | null;
+type SheetName = "add" | "settings" | "split" | "info" | "logs" | "admin" | "group" | "quit" | null;
 type Toast = { id: number; kind: "info" | "error"; text: string };
 
 const PHASE_LABEL: Record<Phase, StringKey> = {
@@ -433,6 +434,9 @@ export default function App() {
   const traffic = session?.traffic;
   const unhealthy = phase === "connected" && health && !health.ok;
   const heroClass = unhealthy || phase === "reconnecting" ? "warning" : phase;
+  // Apps can only be split in VPN mode; sites in every mode.
+  const split = settings.split;
+  const splitActive = split.enabled && (split.sites.length > 0 || (settings.mode === "tun" && split.apps.length > 0));
   const modes = modeOptions(t);
 
   // The built-in group keeps its translated name until the user renames it.
@@ -454,6 +458,9 @@ export default function App() {
             <span>Phi2ray</span>
           </div>
           <div className="top-actions">
+            <button className="icon-btn" onClick={() => setSheet("info")} aria-label={t("connectionInfo")} title={t("connectionInfo")}>
+              {Icon.info()}
+            </button>
             <button className="icon-btn" onClick={() => setSheet("logs")} aria-label={t("logs")} title={t("logs")}>
               {Icon.terminal()}
             </button>
@@ -512,9 +519,21 @@ export default function App() {
                       <span className="ltr">{session.exit.ip}</span>
                     </span>
                   )}
-                  {status.firewall && (
-                    <span className="chip accent" title={t("killSwitchOn")}>
-                      {Icon.lock()}
+                  {(status.firewall || splitActive) && (
+                    <span className="chip accent icons">
+                      {status.firewall && (
+                        <span title={t("killSwitchOn")} aria-label={t("killSwitchOn")}>
+                          {Icon.lock()}
+                        </span>
+                      )}
+                      {splitActive && (
+                        <span
+                          title={`${t("splitActive")} · ${t(split.mode === "exclude" ? "splitExclude" : "splitInclude")}`}
+                          aria-label={t("splitActive")}
+                        >
+                          {Icon.split(12)}
+                        </span>
+                      )}
                     </span>
                   )}
                 </div>
@@ -754,6 +773,10 @@ export default function App() {
             }}
             onBack={() => setSheet("settings")}
           />
+        )}
+
+        {sheet === "info" && (
+          <InfoSheet connected={live} language={settings.language} onClose={() => setSheet(null)} onCopy={copy} />
         )}
 
         {sheet === "logs" && (

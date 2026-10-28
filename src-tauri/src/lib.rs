@@ -4,6 +4,7 @@ mod cores;
 mod delay;
 mod dns;
 mod firewall;
+mod netinfo;
 mod parser;
 mod probe;
 mod proxy;
@@ -434,6 +435,22 @@ async fn check_connection(app: AppHandle) -> Result<Health, String> {
     blocking(app, |_, state| connection::check_now(state)).await?
 }
 
+/// The only pages the window may open: a fixed list, so the WebView can't open arbitrary URLs.
+const LINKS: [(&str, &str); 2] = [("github", "https://github.com/Phoenix15049"), ("site", "http://inosila.com/")];
+
+#[tauri::command]
+async fn open_link(name: String) -> Result<(), String> {
+    let url = LINKS.iter().find(|(n, _)| *n == name).map(|(_, url)| *url).ok_or("Unknown link.")?;
+    win::open_url(url)
+}
+
+/// Only on request: it asks several outside services, so it never runs on its own.
+#[tauri::command]
+async fn connection_info(app: AppHandle) -> Result<netinfo::Report, String> {
+    let target = blocking(app, |_, state| connection::info_target(state)).await??;
+    netinfo::lookup(target).await
+}
+
 #[tauri::command]
 fn get_logs(state: State<AppState>) -> Vec<String> {
     state.logs.lock().unwrap().iter().cloned().collect()
@@ -627,6 +644,8 @@ pub fn run() {
             disconnect,
             status,
             check_connection,
+            connection_info,
+            open_link,
             get_logs,
             clear_logs,
             test_delays,

@@ -118,6 +118,12 @@ pub struct Link {
     /// Probes go straight through the tunnel (VPN mode), testing the whole path apps use.
     /// Not when split tunnelling only sends listed apps through it: Phi2ray itself isn't one.
     probe_direct: bool,
+    /// xray's probe inbound, which always goes to the server.
+    probe_proxy: Via,
+    /// The server as configured, and the IP xray dials when it was looked up beforehand.
+    server_address: String,
+    server_port: u16,
+    server_ip: Option<IpAddr>,
 }
 
 impl Link {
@@ -125,9 +131,29 @@ impl Link {
         if self.probe_direct {
             Via::Direct
         } else {
-            Via::Proxy(self.session.http_port)
+            self.probe_proxy.clone()
         }
     }
+}
+
+/// What the connection info lookup needs: a way through the server, and the server's IP.
+pub struct InfoTarget {
+    pub via: Via,
+    pub server_address: String,
+    pub server_ip: Option<IpAddr>,
+}
+
+/// Always goes through xray's probe inbound, so the answer is what the server's side sees
+/// in every mode, split tunnel included. Resolving the server here uses the same DNS that
+/// xray itself used to reach it.
+pub fn info_target(state: &AppState) -> Result<InfoTarget, String> {
+    let (via, address, port, ip) = {
+        let link = state.link.lock().unwrap();
+        let link = link.as_ref().ok_or("Not connected.")?;
+        (link.probe_proxy.clone(), link.server_address.clone(), link.server_port, link.server_ip)
+    };
+    let ip = ip.or_else(|| resolve_server(state, &address, port).ok());
+    Ok(InfoTarget { via, server_address: address, server_ip: ip })
 }
 
 pub fn connect(app: &AppHandle, state: &AppState, id: &str) -> Result<Session, String> {
@@ -161,7 +187,8 @@ pub fn connect(app: &AppHandle, state: &AppState, id: &str) -> Result<Session, S
     // Look the server up while any previous connection is still up: in VPN mode and with the
     // kill switch, the open network isn't usable once the new connection starts.
     let pin = settings.mode == Mode::Tun || settings.kill_switch;
-    let server_ip = if pin { Some(resolve_server(state, &profile)?) } else { None };
+    let server_ip = if pin { Some(resolve_server(state, &profile.address, profile.port)?) } else { None };
+    let original_address = profile.address.clone();
     let profile = match server_ip {
         Some(ip) => pin_address(&profile, ip),
         None => profile,
@@ -182,7 +209,7 @@ pub fn connect(app: &AppHandle, state: &AppState, id: &str) -> Result<Session, S
     let _ = proxy::restore(&state.paths.proxy_marker);
     *state.link.lock().unwrap() = None;
 
-    match start(state, &profile, &settings, server_ip) {
+    match start(state, &profile, &settings, &original_address, server_ip) {
         Ok(link) => {
             let session = link.session.clone();
             *state.link.lock().unwrap() = Some(link);
@@ -202,7 +229,14 @@ pub fn connect(app: &AppHandle, state: &AppState, id: &str) -> Result<Session, S
     }
 }
 
-fn start(state: &AppState, profile: &Profile, settings: &Settings, server_ip: Option<IpAddr>) -> Result<Link, String> {
+/// `profile` may already point at `server_ip`; `original_address` is what the user configured.
+fn start(
+    state: &AppState,
+    profile: &Profile,
+    settings: &Settings,
+    original_address: &str,
+    server_ip: Option<IpAddr>,
+) -> Result<Link, String> {
     let (socks_port, http_port) = if settings.fixed_ports {
         ensure_free(settings.socks_port)?;
         ensure_free(settings.http_port)?;
@@ -226,6 +260,7 @@ fn start(state: &AppState, profile: &Profile, settings: &Settings, server_ip: Op
         traffic: Traffic::default(),
     };
     let metrics_port = random_port()?;
+    let (probe_port, probe_user, probe_pass) = (random_port()?, random_string(12), random_string(24));
 
     let inbounds = config::Inbounds {
         socks_port,
@@ -233,6 +268,9 @@ fn start(state: &AppState, profile: &Profile, settings: &Settings, server_ip: Op
         socks_user: session.socks_user.clone(),
         socks_pass: session.socks_pass.clone(),
         metrics_port,
+        probe_port,
+        probe_user: probe_user.clone(),
+        probe_pass: probe_pass.clone(),
     };
     let assets = config::Assets {
         geoip: state.paths.core.join("geoip.dat").exists(),
@@ -260,7 +298,18 @@ fn start(state: &AppState, profile: &Profile, settings: &Settings, server_ip: Op
     }
     let include_only = settings.split.rules().is_some() && settings.split.mode == SplitMode::Include;
     let probe_direct = settings.mode == Mode::Tun && !include_only;
-    Ok(Link { session, xray_cfg, tun_cfg, test_url: settings.test_url.clone(), metrics_port, probe_direct })
+    Ok(Link {
+        session,
+        xray_cfg,
+        tun_cfg,
+        test_url: settings.test_url.clone(),
+        metrics_port,
+        probe_direct,
+        probe_proxy: Via::Proxy { port: probe_port, user: probe_user, pass: probe_pass },
+        server_address: original_address.to_string(),
+        server_port: profile.port,
+        server_ip,
+    })
 }
 
 /// Manual disconnect: everything back to how it was, kill switch included.
@@ -307,9 +356,9 @@ pub fn check_now(state: &AppState) -> Result<Health, String> {
         let link = link.as_ref().ok_or("Not connected.")?;
         (link.probe_via(), link.test_url.clone())
     };
-    let ms = probe::check(&url, via);
+    let ms = probe::check(&url, &via);
     let health = Health { ok: ms.is_some(), ms, checked_at: now_ms() };
-    let exit = ms.and_then(|_| probe::exit_info(via));
+    let exit = ms.and_then(|_| probe::exit_info(&via));
     if let Some(link) = state.link.lock().unwrap().as_mut() {
         link.session.health = Some(health.clone());
         if exit.is_some() {
@@ -393,8 +442,8 @@ fn supervise(app: AppHandle, generation: u64) {
         let Some((via, url)) = state.link.lock().unwrap().as_ref().map(|l| (l.probe_via(), l.test_url.clone())) else {
             return;
         };
-        let ms = probe::check(&url, via);
-        let exit = if ms.is_some() && need_exit_info { probe::exit_info(via) } else { None };
+        let ms = probe::check(&url, &via);
+        let exit = if ms.is_some() && need_exit_info { probe::exit_info(&via) } else { None };
         if !current() {
             return;
         }
@@ -492,21 +541,21 @@ fn firewall_rules(state: &AppState, settings: &Settings) -> firewall::Rules {
 
 /// Resolves the server, falling back to the last known address when DNS isn't reachable
 /// (for example while the kill switch is blocking the open network).
-fn resolve_server(state: &AppState, p: &Profile) -> Result<IpAddr, String> {
-    if let Ok(ip) = p.address.parse::<IpAddr>() {
+fn resolve_server(state: &AppState, address: &str, port: u16) -> Result<IpAddr, String> {
+    if let Ok(ip) = address.parse::<IpAddr>() {
         return Ok(ip);
     }
-    let lookup = (p.address.as_str(), p.port).to_socket_addrs().map(|addrs| {
+    let lookup = (address, port).to_socket_addrs().map(|addrs| {
         let addrs: Vec<SocketAddr> = addrs.collect();
         addrs.iter().find(|a| a.is_ipv4()).or(addrs.first()).map(|a| a.ip())
     });
     let mut cache = state.resolved.lock().unwrap();
     match lookup {
         Ok(Some(ip)) => {
-            cache.insert(p.address.clone(), ip);
+            cache.insert(address.to_string(), ip);
             Ok(ip)
         }
-        _ => cache.get(&p.address).copied().ok_or_else(|| format!("Cannot resolve server {}", p.address)),
+        _ => cache.get(address).copied().ok_or_else(|| format!("Cannot resolve server {address}")),
     }
 }
 

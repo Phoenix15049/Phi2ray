@@ -113,6 +113,28 @@ export type About = {
   dataDir: string;
 };
 
+/** One geolocation database's view of an IP. */
+export type Geo = {
+  source: string;
+  ip: string | null;
+  country: string | null;
+  region: string | null;
+  city: string | null;
+  asn: string | null;
+  org: string | null;
+  proxy: boolean | null;
+  error: string | null;
+};
+
+/** Looked up on request only, always through the server. */
+export type ConnectionInfo = {
+  exit: Geo[];
+  trace: { ip: string; country: string | null; colo: string | null } | null;
+  /** Where the connection enters: the server address xray dials. */
+  entry: { address: string; ip: string; public: boolean; geo: Geo[] } | null;
+  checkedAt: number;
+};
+
 export type DelayResult = { id: string; ms: number | null };
 export type SubscriptionResult = { groupId: string; count: number; skipped: number };
 
@@ -155,6 +177,7 @@ export const api = {
   disconnect: () => backend.call<void>("disconnect"),
   status: () => backend.call<Status>("status"),
   checkConnection: () => backend.call<Health>("check_connection"),
+  connectionInfo: () => backend.call<ConnectionInfo>("connection_info"),
   getLogs: () => backend.call<string[]>("get_logs"),
   clearLogs: () => backend.call<void>("clear_logs"),
   testDelays: (ids: string[] = []) => backend.call<void>("test_delays", { ids }),
@@ -163,6 +186,8 @@ export const api = {
   pingDns: (servers: string[]) => backend.call<(number | null)[]>("ping_dns", { servers }),
   quitApp: () => backend.call<void>("quit_app"),
   hideWindow: () => backend.call<void>("hide_window"),
+  /** Only the app's own fixed links ("github", "site"). */
+  openLink: (name: "github" | "site") => backend.call<void>("open_link", { name }),
 };
 
 export const onEvent = <T,>(event: string, cb: (payload: T) => void) => backend.on<T>(event, cb);

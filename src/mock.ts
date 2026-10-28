@@ -54,6 +54,9 @@ let settings: Settings = {
   selected: profiles[0].id,
   language: params.get("lang") === "fa" ? "fa" : "en",
   theme: (params.get("theme") as Settings["theme"]) ?? DEFAULT_SETTINGS.theme,
+  split: params.get("split")
+    ? { enabled: true, mode: "exclude", apps: ["Telegram.exe"], sites: ["digikala.com"] }
+    : DEFAULT_SETTINGS.split,
 };
 let session: Session | null =
   params.get("demo") === "connected"
@@ -195,11 +198,36 @@ const handlers: Record<string, (args: Record<string, any>) => unknown> = {
     location.reload();
   },
   hide_window: () => {},
+  open_link: () => {},
   check_connection: async () => {
     await wait(400);
     const health = { ok: true, ms: Math.round(120 + Math.random() * 400), checkedAt: Date.now() };
     if (session) session = { ...session, health };
     return health;
+  },
+  connection_info: async () => {
+    await wait(1100);
+    if (!session) throw "Not connected.";
+    // Documentation-range IPs: an entry relay in one country, the exit in another.
+    const exit = { ip: "203.0.113.24", region: "Hesse", asn: "AS64500", org: "Example Hosting GmbH", proxy: null, error: null };
+    return {
+      exit: [
+        { ...exit, source: "ipapi.co", country: "DE", city: "Neu-Isenburg" },
+        { ...exit, source: "DB-IP", country: "DE", city: "Frankfurt am Main", asn: null, org: null },
+        { ...exit, source: "FreeIPAPI", country: "DE", city: "Frankfurt am Main", proxy: false },
+      ],
+      trace: { ip: "203.0.113.24", country: "DE", colo: "FRA" },
+      entry: {
+        address: profiles.find((p) => p.id === session?.profileId)?.address ?? "server.example.com",
+        ip: "198.51.100.7",
+        public: true,
+        geo: [
+          { source: "ipapi.co", ip: "198.51.100.7", country: "IR", region: "Tehran", city: "Tehran", asn: "AS64501", org: "Example Telecom", proxy: null, error: null },
+          { source: "FreeIPAPI", ip: null, country: null, region: null, city: null, asn: null, org: null, proxy: null, error: "Rate limited, try later" },
+        ],
+      },
+      checkedAt: Date.now(),
+    };
   },
   get_logs: () => [...logs],
   clear_logs: () => {

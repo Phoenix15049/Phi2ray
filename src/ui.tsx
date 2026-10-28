@@ -95,7 +95,14 @@ export const Icon = {
       12,
     ),
   down: () => svg(<path d="M12 4v15M6 13l6 6 6-6" />, 14),
-  split: () => svg(<path d="M4 12h6l4-6h6M14 18h6M10 12l4 6M17 3l3 3-3 3M17 15l3 3-3 3" />),
+  split: (size?: number) => svg(<path d="M4 12h6l4-6h6M14 18h6M10 12l4 6M17 3l3 3-3 3M17 15l3 3-3 3" />, size),
+  info: () =>
+    svg(
+      <>
+        <circle cx="12" cy="12" r="9" />
+        <path d="M12 11v5M12 7.5h.01" />
+      </>,
+    ),
   chevron: () => svg(<path d="m9 6 6 6-6 6" />, 16),
   up: () => svg(<path d="M12 20V5M6 11l6-6 6 6" />, 14),
   server: () =>

@@ -545,6 +545,12 @@ select:focus-visible {
   color: var(--accent);
   background: var(--accent-soft);
 }
+.chip.icons {
+  gap: 7px;
+}
+.chip.icons > span {
+  display: inline-flex;
+}
 .chip.health.checking {
   color: var(--text-3);
 }
@@ -1483,6 +1489,150 @@ select:focus-visible {
   user-select: text;
   overflow-wrap: anywhere;
   line-height: 1.6;
+}
+
+.credit {
+  margin: 22px 0 2px;
+  text-align: center;
+  font-size: 10.5px;
+  color: var(--text-3);
+  opacity: 0.75;
+}
+.link {
+  padding: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, currentColor 35%, transparent);
+  text-underline-offset: 2px;
+}
+.link:hover {
+  color: var(--accent);
+}
+
+/* Connection info */
+.info-loading {
+  animation: blink 1.4s ease-in-out infinite;
+}
+.info-hero {
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface-2);
+  animation: fade-in 0.25s ease-out;
+}
+.info-hero-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.info-country {
+  font-size: 22px;
+  font-weight: 800;
+  line-height: 1.2;
+}
+.info-code {
+  padding: 3px 8px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.info-ip-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 6px;
+}
+.info-ip {
+  font-family: var(--mono);
+  font-size: 16px;
+  font-weight: 700;
+}
+.info-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 12px;
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--text-2);
+}
+.route-card {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  margin-bottom: 10px;
+}
+.route-card.hops {
+  border-color: color-mix(in srgb, var(--warn) 40%, var(--border));
+  background: color-mix(in srgb, var(--warn) 6%, transparent);
+}
+.route-card.direct,
+.route-card.sameNetwork {
+  border-color: color-mix(in srgb, var(--on) 35%, var(--border));
+  background: color-mix(in srgb, var(--on) 5%, transparent);
+}
+.route-path {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+}
+.route-node {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-width: 0;
+  text-align: center;
+}
+.route-label {
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--text-3);
+}
+.route-value {
+  font-size: 12.5px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+.route-arrow {
+  display: inline-flex;
+  color: var(--text-3);
+  opacity: 0.7;
+}
+.route-arrow.dashed {
+  color: var(--warn);
+  opacity: 1;
+}
+[dir="rtl"] .route-arrow {
+  transform: scaleX(-1);
+}
+.route-verdict {
+  margin: 10px 0 0;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--text-2);
+}
+.info-facts {
+  grid-template-columns: auto 1fr;
+}
+.info-facts dd {
+  overflow-wrap: anywhere;
+}
+.facts dd.muted {
+  color: var(--text-3);
+  font-weight: 500;
 }
 
 .logs {

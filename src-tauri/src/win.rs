@@ -17,6 +17,7 @@ mod imp {
 
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
     use windows_sys::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
+    use windows_sys::Win32::System::SystemInformation::GetSystemWindowsDirectoryW;
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
         JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
@@ -113,6 +114,20 @@ mod imp {
         apps
     }
 
+    /// The real Windows folder, from the system rather than the (user-editable) environment.
+    fn windows_dir() -> Option<std::path::PathBuf> {
+        let mut buf = [0u16; 260];
+        let len = unsafe { GetSystemWindowsDirectoryW(buf.as_mut_ptr(), buf.len() as u32) } as usize;
+        (len > 0 && len < buf.len()).then(|| std::path::PathBuf::from(String::from_utf16_lossy(&buf[..len])))
+    }
+
+    /// Opens a web page in the default browser. Phi2ray runs as administrator, so the page is
+    /// handed to Explorer, which opens it as the signed-in user instead of elevated.
+    pub fn open_url(url: &str) -> Result<(), String> {
+        let explorer = windows_dir().ok_or("Windows folder not found.")?.join("explorer.exe");
+        std::process::Command::new(explorer).arg(url).spawn().map(drop).map_err(|e| e.to_string())
+    }
+
     /// Starts a new elevated instance (UAC prompt). The caller should then exit.
     pub fn relaunch_as_admin() -> Result<(), String> {
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
@@ -137,6 +152,10 @@ mod imp {
 
     pub fn relaunch_as_admin() -> Result<(), String> {
         Err("Run Phi2ray with sudo to use VPN mode.".into())
+    }
+
+    pub fn open_url(_url: &str) -> Result<(), String> {
+        Err("Not supported on this system.".into())
     }
 
     pub fn running_apps() -> Vec<super::RunningApp> {

@@ -237,6 +237,17 @@ export function SettingsSheet(p: Props) {
           </p>
         )}
       </Section>
+
+      <p className="credit">
+        {t("madeBy")}{" "}
+        <button className="link ltr" onClick={() => api.openLink("github").catch(() => {})}>
+          @Phoenix15049
+        </button>
+        <span aria-hidden="true"> · </span>
+        <button className="link ltr" onClick={() => api.openLink("site").catch(() => {})}>
+          inosila.com
+        </button>
+      </p>
     </Sheet>
   );
 }

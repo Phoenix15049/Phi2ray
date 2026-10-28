@@ -5,6 +5,7 @@ use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::{Duration, Instant};
 
+use base64::Engine;
 use serde::Serialize;
 use url::Url;
 
@@ -14,13 +15,13 @@ const MAX_BODY: usize = 16 * 1024;
 const TRACE_URL: &str = "http://1.1.1.1/cdn-cgi/trace";
 
 /// How a probe reaches the internet.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub enum Via {
     /// Straight from this process. In VPN mode that means through the tunnel, which
     /// tests the whole path apps use (adapter, routing, DNS, xray, server).
     Direct,
-    /// Through xray's local HTTP inbound on this port.
-    Proxy(u16),
+    /// Through xray's password-protected probe inbound, which always goes to the server.
+    Proxy { port: u16, user: String, pass: String },
 }
 
 #[derive(Clone, Serialize)]
@@ -31,12 +32,12 @@ pub struct ExitInfo {
 }
 
 /// Fetches `url` and returns the time to the response headers, if the status was 2xx/3xx.
-pub fn check(url: &str, via: Via) -> Option<u32> {
+pub fn check(url: &str, via: &Via) -> Option<u32> {
     let (ms, status, _) = get(url, via, MAX_BODY)?;
     (200..400).contains(&status).then_some(ms)
 }
 
-pub fn exit_info(via: Via) -> Option<ExitInfo> {
+pub fn exit_info(via: &Via) -> Option<ExitInfo> {
     let (_, status, body) = get(TRACE_URL, via, MAX_BODY)?;
     if status != 200 {
         return None;
@@ -47,7 +48,7 @@ pub fn exit_info(via: Via) -> Option<ExitInfo> {
 /// Total bytes (up, down) through the proxy outbound, from xray's localhost metrics endpoint.
 pub fn xray_traffic(metrics_port: u16) -> Option<(u64, u64)> {
     let url = format!("http://127.0.0.1:{metrics_port}/debug/vars");
-    let (_, status, body) = get(&url, Via::Direct, 256 * 1024)?;
+    let (_, status, body) = get(&url, &Via::Direct, 256 * 1024)?;
     if status != 200 {
         return None;
     }
@@ -67,7 +68,7 @@ fn parse_trace(body: &str) -> Option<ExitInfo> {
 }
 
 /// Minimal HTTP/1.1 GET with `Connection: close`. Returns (ms to first byte, status, body).
-fn get(url: &str, via: Via, max_body: usize) -> Option<(u32, u16, String)> {
+fn get(url: &str, via: &Via, max_body: usize) -> Option<(u32, u16, String)> {
     let url = Url::parse(url).ok()?;
     if url.scheme() != "http" {
         return None;
@@ -79,6 +80,7 @@ fn get(url: &str, via: Via, max_body: usize) -> Option<(u32, u16, String)> {
         None => host.to_string(),
     };
 
+    let mut proxy_auth = String::new();
     let (mut stream, target) = match via {
         Via::Direct => {
             let addr = (host, port).to_socket_addrs().ok()?.next()?;
@@ -88,8 +90,10 @@ fn get(url: &str, via: Via, max_body: usize) -> Option<(u32, u16, String)> {
             };
             (TcpStream::connect_timeout(&addr, TIMEOUT).ok()?, path)
         }
-        Via::Proxy(proxy_port) => {
-            let addr = ([127, 0, 0, 1], proxy_port).into();
+        Via::Proxy { port, user, pass } => {
+            let credentials = base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pass}"));
+            proxy_auth = format!("Proxy-Authorization: Basic {credentials}\r\n");
+            let addr = ([127, 0, 0, 1], *port).into();
             (TcpStream::connect_timeout(&addr, TIMEOUT).ok()?, url.to_string())
         }
     };
@@ -97,7 +101,9 @@ fn get(url: &str, via: Via, max_body: usize) -> Option<(u32, u16, String)> {
     stream.set_write_timeout(Some(TIMEOUT)).ok()?;
 
     let start = Instant::now();
-    let request = format!("GET {target} HTTP/1.1\r\nHost: {host_header}\r\nUser-Agent: Phi2ray\r\nConnection: close\r\n\r\n");
+    let request = format!(
+        "GET {target} HTTP/1.1\r\nHost: {host_header}\r\n{proxy_auth}User-Agent: Phi2ray\r\nConnection: close\r\n\r\n"
+    );
     stream.write_all(request.as_bytes()).ok()?;
 
     let mut buf = Vec::new();
