@@ -4,7 +4,7 @@
 
 # Phi2ray
 
-**An Xray client for Windows that tries hard not to leak.**
+**An Xray client for Windows that tries hard not to leak.🐱**
 
 [![Latest release](https://img.shields.io/github/v/release/Phoenix15049/Phi2ray?label=release&color=6c5cf6)](https://github.com/Phoenix15049/Phi2ray/releases/latest)
 ![Windows 10 / 11](https://img.shields.io/badge/Windows-10%20%7C%2011-1fb6d0)
