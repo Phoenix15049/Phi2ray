@@ -817,6 +817,15 @@ select:focus-visible {
   color: var(--bad);
   overflow-wrap: anywhere;
 }
+.group-error.warn {
+  color: var(--warn);
+}
+.server-meta .insecure {
+  display: inline-flex;
+  vertical-align: -1px;
+  margin-inline-start: 6px;
+  color: var(--warn);
+}
 
 .search {
   display: flex;

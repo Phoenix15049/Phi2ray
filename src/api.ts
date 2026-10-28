@@ -12,6 +12,8 @@ export type Profile = {
   port: number;
   groupId: string;
   stream: { network: string; security: string };
+  /** Not encrypted to the server, or its TLS certificate isn't checked. */
+  insecure: boolean;
 };
 
 export type Subscription = {

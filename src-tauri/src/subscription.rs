@@ -11,6 +11,10 @@ use crate::parser::{self, Profile};
 
 const FETCH_TIMEOUT: Duration = Duration::from_secs(20);
 const DEFAULT_INTERVAL_HOURS: u32 = 12;
+/// Real subscriptions are a few KB to a few hundred KB.
+const MAX_BODY: usize = 8 * 1024 * 1024;
+const TOO_LARGE: &str = "The subscription is too large (over 8 MB).";
+const MAX_REDIRECTS: usize = 5;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -75,7 +79,19 @@ pub async fn fetch(url: &str, proxy_port: Option<u16>) -> Result<Fetched, String
 
     let mut client = reqwest::Client::builder()
         .timeout(FETCH_TIMEOUT)
-        .user_agent(concat!("Phi2ray/", env!("CARGO_PKG_VERSION")));
+        .user_agent(concat!("Phi2ray/", env!("CARGO_PKG_VERSION")))
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            // An https link must stay https: a redirect to http would let anyone on the
+            // path read the subscription token and swap the servers.
+            let downgrade = attempt.previous().iter().any(|u| u.scheme() == "https") && attempt.url().scheme() != "https";
+            if downgrade {
+                attempt.error("the provider redirected to an unencrypted (http) address")
+            } else if attempt.previous().len() >= MAX_REDIRECTS {
+                attempt.error("too many redirects")
+            } else {
+                attempt.follow()
+            }
+        }));
     if let Some(port) = proxy_port {
         let proxy = reqwest::Proxy::all(format!("http://127.0.0.1:{port}")).map_err(|e| e.to_string())?;
         client = client.proxy(proxy);
@@ -92,7 +108,19 @@ pub async fn fetch(url: &str, proxy_port: Option<u16>) -> Result<Fetched, String
     let usage = header("subscription-userinfo").map(|v| parse_userinfo(&v)).unwrap_or_default();
     let title = header("profile-title").and_then(|v| decode_title(&v));
     let interval_hours = header("profile-update-interval").and_then(|v| v.trim().parse().ok());
-    let body = response.text().await.map_err(|e| describe(&e))?;
+    // Read in pieces and stop at the limit, so a broken or hostile provider can't fill memory.
+    if response.content_length().is_some_and(|len| len > MAX_BODY as u64) {
+        return Err(TOO_LARGE.into());
+    }
+    let mut response = response;
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|e| describe(&e))? {
+        if bytes.len() + chunk.len() > MAX_BODY {
+            return Err(TOO_LARGE.into());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    let body = String::from_utf8_lossy(&bytes);
 
     let (profiles, errors) = parser::parse_many(&body);
     if profiles.is_empty() {

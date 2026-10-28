@@ -13,6 +13,7 @@ use url::Url;
 
 use crate::config;
 use crate::parser::Profile;
+use crate::xray::PortState;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(6);
 
@@ -54,8 +55,9 @@ pub async fn test(exe: &Path, asset_dir: &Path, profile: &Profile, target: &Test
 
     let mut child = cmd.spawn().ok()?;
     #[cfg(windows)]
-    if let Some(handle) = child.raw_handle() {
-        crate::win::bind_to_app(handle);
+    if child.raw_handle().is_none_or(|handle| crate::win::bind_to_app(handle).is_err()) {
+        let _ = child.kill().await;
+        return None;
     }
     let mut stdin = child.stdin.take()?;
     let sent = stdin.write_all(cfg.as_bytes()).await.is_ok();
@@ -67,12 +69,15 @@ pub async fn test(exe: &Path, asset_dir: &Path, profile: &Profile, target: &Test
 }
 
 async fn wait_ready(child: &mut Child, port: u16) -> bool {
+    let Some(pid) = child.id() else { return false };
     for _ in 0..60 {
         if !matches!(child.try_wait(), Ok(None)) {
             return false; // xray rejected the config
         }
-        if TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
-            return true;
+        match crate::xray::port_state(pid, &[port]) {
+            PortState::Ready => return true,
+            PortState::Taken(_) => return false,
+            PortState::Waiting => {}
         }
         sleep(Duration::from_millis(50)).await;
     }

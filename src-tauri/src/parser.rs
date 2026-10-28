@@ -60,7 +60,63 @@ pub struct Profile {
     pub stream: Stream,
 }
 
-/// Parses pasted text: one link per line, or a base64 subscription body.
+/// Most servers taken from one paste or subscription; real lists have tens to hundreds.
+pub const MAX_PROFILES: usize = 2000;
+/// Longest link accepted. Real ones are well under 2 KB; vmess JSON with long paths a bit more.
+const MAX_LINK_LEN: usize = 16 * 1024;
+const MAX_NAME_LEN: usize = 100;
+
+/// What the window gets for a server: everything it shows, but no id/password.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileView {
+    pub id: String,
+    pub name: String,
+    pub protocol: Protocol,
+    pub address: String,
+    pub port: u16,
+    pub group_id: String,
+    pub stream: StreamView,
+    /// Traffic to the server isn't encrypted, or its certificate isn't checked.
+    pub insecure: bool,
+}
+
+#[derive(Serialize)]
+pub struct StreamView {
+    pub network: String,
+    pub security: String,
+}
+
+impl Profile {
+    pub fn view(&self) -> ProfileView {
+        ProfileView {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            protocol: self.protocol.clone(),
+            address: self.address.clone(),
+            port: self.port,
+            group_id: self.group_id.clone(),
+            stream: StreamView { network: self.stream.network.clone(), security: self.stream.security.clone() },
+            insecure: self.insecure(),
+        }
+    }
+
+    /// No TLS/REALITY on a protocol that doesn't encrypt by itself, or TLS that accepts any
+    /// certificate (`allowInsecure`), which anyone on the path could intercept.
+    pub fn insecure(&self) -> bool {
+        let s = &self.stream;
+        let plain = s.security == "none"
+            && match self.protocol {
+                Protocol::Vless | Protocol::Trojan => true,
+                Protocol::Vmess => matches!(self.method.as_str(), "none" | "zero"),
+                Protocol::Shadowsocks => matches!(self.method.as_str(), "none" | "plain"),
+            };
+        plain || (s.security == "tls" && s.allow_insecure)
+    }
+}
+
+/// Parses pasted text: one link per line, or a base64 subscription body. At most
+/// `MAX_PROFILES` servers are taken; the rest count as errors.
 pub fn parse_many(text: &str) -> (Vec<Profile>, Vec<String>) {
     let text = text.trim();
     let body = if text.contains("://") {
@@ -78,8 +134,21 @@ pub fn parse_many(text: &str) -> (Vec<Profile>, Vec<String>) {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
+        if profiles.len() >= MAX_PROFILES {
+            errors.push(format!("more than {MAX_PROFILES} servers, the rest were skipped"));
+            break;
+        }
+        if line.len() > MAX_LINK_LEN {
+            errors.push(format!("{}…: link too long", line.chars().take(32).collect::<String>()));
+            continue;
+        }
         match parse_link(line) {
-            Ok(p) => profiles.push(p),
+            Ok(mut p) => {
+                if p.name.chars().count() > MAX_NAME_LEN {
+                    p.name = p.name.chars().take(MAX_NAME_LEN).collect();
+                }
+                profiles.push(p)
+            }
             Err(e) => errors.push(format!("{}…: {e}", line.chars().take(32).collect::<String>())),
         }
     }
@@ -297,6 +366,32 @@ fn new_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn limits() {
+        let many: String = (0..MAX_PROFILES + 5).map(|i| format!("trojan://pw@h{i}.com:443\n")).collect();
+        let (profiles, errors) = parse_many(&many);
+        assert_eq!(profiles.len(), MAX_PROFILES);
+        assert_eq!(errors.len(), 1);
+        let long = format!("trojan://pw@a.com:443?path={}", "a".repeat(MAX_LINK_LEN));
+        assert!(parse_many(&long).0.is_empty());
+        let named = format!("trojan://pw@a.com:443#{}", "n".repeat(500));
+        assert_eq!(parse_many(&named).0[0].name.chars().count(), MAX_NAME_LEN);
+    }
+
+    #[test]
+    fn insecure_servers() {
+        let p = |l: &str| parse_link(l).unwrap().insecure();
+        assert!(p("vless://id@a.com:443?security=none"));
+        assert!(p("trojan://pw@a.com:443?security=tls&allowInsecure=1"));
+        assert!(!p("vless://id@a.com:443?security=reality&pbk=K"));
+        assert!(!p("trojan://pw@a.com:443"));
+        let ss = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, "aes-256-gcm:pw");
+        assert!(!p(&format!("ss://{ss}@a.com:8388")));
+        // The window's copy has no credentials.
+        let view = serde_json::to_string(&parse_link("trojan://secretpw@a.com:443").unwrap().view()).unwrap();
+        assert!(!view.contains("secretpw"));
+    }
 
     #[test]
     fn vless_reality() {

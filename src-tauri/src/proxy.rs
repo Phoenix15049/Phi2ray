@@ -40,7 +40,10 @@ mod imp {
                 server: key.get_value("ProxyServer").unwrap_or_default(),
                 overrides: key.get_value("ProxyOverride").unwrap_or_default(),
             };
-            fs::write(marker, serde_json::to_vec(&saved).unwrap()).map_err(|e| e.to_string())?;
+            // Written to a temporary file and renamed, so a crash can't leave half a backup.
+            let tmp = marker.with_extension("tmp");
+            fs::write(&tmp, serde_json::to_vec(&saved).unwrap()).map_err(|e| e.to_string())?;
+            fs::rename(&tmp, marker).map_err(|e| e.to_string())?;
         }
         let err = |e: std::io::Error| format!("cannot set system proxy: {e}");
         key.set_value("ProxyServer", &format!("127.0.0.1:{port}")).map_err(err)?;
@@ -52,8 +55,22 @@ mod imp {
 
     pub fn restore(marker: &Path) -> Result<(), String> {
         let Ok(bytes) = fs::read(marker) else { return Ok(()) };
-        let saved: Saved = serde_json::from_slice(&bytes).unwrap_or_default();
         let key = open()?;
+        let Ok(saved) = serde_json::from_slice::<Saved>(&bytes) else {
+            // The backup is unreadable, so the earlier settings are unknown. Undo only what is
+            // certainly ours (a proxy on this computer) and leave everything else alone.
+            let server: String = key.get_value("ProxyServer").unwrap_or_default();
+            if server.starts_with("127.0.0.1:") {
+                key.set_value("ProxyEnable", &0u32).map_err(|e| format!("cannot restore system proxy: {e}"))?;
+                notify();
+            }
+            let _ = fs::remove_file(marker);
+            return Err(
+                "The saved proxy settings were damaged, so only Phi2ray's own proxy was turned off. \
+                 Check the proxy settings in Windows."
+                    .into(),
+            );
+        };
         let err = |e: std::io::Error| format!("cannot restore system proxy: {e}");
         key.set_value("ProxyEnable", &saved.enable).map_err(err)?;
         key.set_value("ProxyServer", &saved.server).map_err(err)?;

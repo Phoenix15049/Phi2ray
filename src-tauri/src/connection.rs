@@ -115,6 +115,8 @@ pub struct Link {
     tun_cfg: Option<Value>,
     test_url: String,
     metrics_port: u16,
+    /// xray's local listening ports, SOCKS first (what sing-box connects to).
+    local_ports: [u16; 4],
     /// Probes go straight through the tunnel (VPN mode), testing the whole path apps use.
     /// Not when split tunnelling only sends listed apps through it: Phi2ray itself isn't one.
     probe_direct: bool,
@@ -209,7 +211,7 @@ pub fn connect(app: &AppHandle, state: &AppState, id: &str) -> Result<Session, S
     // Stop the previous connection (its supervisor exits when the generation changes).
     state.generation.fetch_add(1, Ordering::SeqCst);
     state.core.lock().unwrap().stop();
-    let _ = proxy::restore(&state.paths.proxy_marker);
+    restore_proxy(state);
     *state.link.lock().unwrap() = None;
 
     match start(state, &profile, &settings, &original_address, server_ip) {
@@ -223,7 +225,7 @@ pub fn connect(app: &AppHandle, state: &AppState, id: &str) -> Result<Session, S
         }
         Err(e) => {
             state.core.lock().unwrap().stop();
-            let _ = proxy::restore(&state.paths.proxy_marker);
+            restore_proxy(state);
             log(state, format!("[app] Connect failed: {e}"));
             if settings.kill_switch && was_protected {
                 // The previous connection is already gone: keep blocking until the user
@@ -300,7 +302,8 @@ fn start(
 
     log(state, format!("[app] Connecting to {} ({:?} mode)", profile.name, settings.mode));
     let mut core = state.core.lock().unwrap();
-    core.start_xray(&state.paths.xray(), &state.paths.core, &xray_cfg, socks_port)?;
+    let local_ports = [socks_port, http_port, probe_port, metrics_port];
+    core.start_xray(&state.paths.xray(), &state.paths.core, &xray_cfg, &local_ports)?;
     match (&tun_cfg, settings.mode) {
         (Some(cfg), _) => core.start_tun(&state.paths.sing_box(), &state.paths.data.join("sing-box"), cfg)?,
         (None, Mode::System) => proxy::enable(http_port, &state.paths.proxy_marker)?,
@@ -314,6 +317,7 @@ fn start(
         tun_cfg,
         test_url: settings.test_url.clone(),
         metrics_port,
+        local_ports,
         probe_direct,
         probe_proxy: Via::Proxy { port: probe_port, user: probe_user, pass: probe_pass },
         server_address: original_address.to_string(),
@@ -334,7 +338,7 @@ pub fn disconnect(state: &AppState) {
 fn teardown(state: &AppState) {
     state.generation.fetch_add(1, Ordering::SeqCst);
     state.core.lock().unwrap().stop();
-    let _ = proxy::restore(&state.paths.proxy_marker);
+    restore_proxy(state);
     *state.link.lock().unwrap() = None;
 }
 
@@ -501,10 +505,10 @@ fn supervise(app: AppHandle, generation: u64) {
 
 /// Restarts the failed parts of the current connection in place (same ports and credentials).
 fn restart(state: &AppState, xray: bool, tun: bool) -> Result<(), String> {
-    let (xray_cfg, tun_cfg, socks_port) = {
+    let (xray_cfg, tun_cfg, local_ports) = {
         let link = state.link.lock().unwrap();
         let link = link.as_ref().ok_or("Not connected.")?;
-        (link.xray_cfg.clone(), link.tun_cfg.clone(), link.session.socks_port)
+        (link.xray_cfg.clone(), link.tun_cfg.clone(), link.local_ports)
     };
     if xray {
         crate::verify_cached(state, &state.paths.xray())?;
@@ -514,7 +518,7 @@ fn restart(state: &AppState, xray: bool, tun: bool) -> Result<(), String> {
     }
     let mut core = state.core.lock().unwrap();
     if xray {
-        core.start_xray(&state.paths.xray(), &state.paths.core, &xray_cfg, socks_port)?;
+        core.start_xray(&state.paths.xray(), &state.paths.core, &xray_cfg, &local_ports)?;
     }
     if let (true, Some(cfg)) = (tun, &tun_cfg) {
         core.start_tun(&state.paths.sing_box(), &state.paths.data.join("sing-box"), cfg)?;
@@ -593,8 +597,15 @@ pub fn pin_address(p: &Profile, ip: IpAddr) -> Profile {
     p
 }
 
+/// Puts back the user's own proxy settings; a failure is logged, never silently dropped.
+fn restore_proxy(state: &AppState) {
+    if let Err(e) = proxy::restore(&state.paths.proxy_marker) {
+        log(state, format!("[app] {e}"));
+    }
+}
+
 pub fn log(state: &AppState, line: impl Into<String>) {
-    state.logs.lock().unwrap().push_back(line.into());
+    crate::xray::push_log(&state.logs, line.into());
 }
 
 pub fn now_ms() -> u64 {

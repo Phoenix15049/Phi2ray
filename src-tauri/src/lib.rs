@@ -29,7 +29,7 @@ use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WindowEvent};
 use tokio::sync::Semaphore;
 
 use crate::connection::{now_ms, Health, Link, Session};
-use crate::parser::Profile;
+use crate::parser::{Profile, ProfileView};
 use crate::store::{Group, Settings, Store, DEFAULT_GROUP};
 use crate::subscription::Subscription;
 use crate::xray::{Core, Logs, SING_BOX_EXE, XRAY_EXE};
@@ -82,7 +82,8 @@ pub(crate) struct AppState {
 #[serde(rename_all = "camelCase")]
 struct Snapshot {
     groups: Vec<Group>,
-    profiles: Vec<Profile>,
+    /// Without credentials: the window never needs them.
+    profiles: Vec<ProfileView>,
     settings: Settings,
 }
 
@@ -145,7 +146,7 @@ async fn blocking<T: Send + 'static>(
 #[tauri::command]
 fn get_state(state: State<AppState>) -> Snapshot {
     let store = state.store.lock().unwrap();
-    Snapshot { groups: store.groups.clone(), profiles: store.profiles.clone(), settings: store.settings.clone() }
+    Snapshot { groups: store.groups.clone(), profiles: store.profiles.iter().map(Profile::view).collect(), settings: store.settings.clone() }
 }
 
 // ---------- Servers and groups ----------
@@ -607,13 +608,22 @@ pub fn run() {
                 logs.lock().unwrap().push_back(format!("[app] {e}"));
             }
             // Recover the user's proxy settings if we crashed while connected.
-            let _ = proxy::restore(&paths.proxy_marker);
+            if let Err(e) = proxy::restore(&paths.proxy_marker) {
+                logs.lock().unwrap().push_back(format!("[app] {e}"));
+            }
+            // Kill switch rules left by a crash keep blocking until the user reconnects or unblocks.
+            let blocked = firewall::recover();
+            if blocked {
+                logs.lock().unwrap().push_back(
+                    "[app] Phi2ray closed unexpectedly while the kill switch was on. The internet stays blocked until you reconnect or unblock.".into(),
+                );
+            }
             app.manage(AppState {
                 store: Mutex::new(Store::load(&paths.store)),
                 core: Mutex::new(Core::new(logs.clone())),
                 link: Mutex::new(None),
                 generation: AtomicU64::new(0),
-                blocked: AtomicBool::new(false),
+                blocked: AtomicBool::new(blocked),
                 logs,
                 switching: Mutex::new(()),
                 verified: Mutex::new(HashMap::new()),

@@ -27,6 +27,8 @@ pub const SING_BOX_EXE: &str = "sing-box";
 pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 const MAX_LOG_LINES: usize = 1000;
+/// Longer lines are cut, so one runaway message can't take much memory.
+const MAX_LINE_LEN: usize = 2000;
 
 pub type Logs = Arc<Mutex<VecDeque<String>>>;
 
@@ -41,7 +43,8 @@ impl Core {
         Self { xray: None, tun: None, logs }
     }
 
-    pub fn start_xray(&mut self, exe: &Path, asset_dir: &Path, config: &Value, socks_port: u16) -> Result<(), String> {
+    /// `ports` are xray's local listening ports; the first is the one sing-box uses.
+    pub fn start_xray(&mut self, exe: &Path, asset_dir: &Path, config: &Value, ports: &[u16]) -> Result<(), String> {
         if let Some(old) = self.xray.take() {
             kill(old);
         }
@@ -49,15 +52,20 @@ impl Core {
         cmd.args(["run", "-format", "json", "-c", "stdin:"]).env("XRAY_LOCATION_ASSET", asset_dir);
         let mut child = self.launch("xray", cmd, &config.to_string())?;
 
-        // Ready once the local SOCKS inbound accepts connections.
+        // Ready once xray itself listens on every local port.
         let deadline = Instant::now() + Duration::from_secs(5);
+        let pid = child.id();
         loop {
             if let Ok(Some(status)) = child.try_wait() {
                 return Err(format!("Xray exited ({status}). See logs for details."));
             }
-            let addr = ([127, 0, 0, 1], socks_port).into();
-            if TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok() {
-                break;
+            match port_state(pid, ports) {
+                PortState::Ready => break,
+                PortState::Taken(port) => {
+                    kill(child);
+                    return Err(format!("Local port {port} is being used by another program. Connect again to use new ports."));
+                }
+                PortState::Waiting => {}
             }
             if Instant::now() > deadline {
                 kill(child);
@@ -115,7 +123,10 @@ impl Core {
         #[cfg(windows)]
         {
             use std::os::windows::io::AsRawHandle;
-            crate::win::bind_to_app(child.as_raw_handle());
+            if let Err(e) = crate::win::bind_to_app(child.as_raw_handle()) {
+                kill(child);
+                return Err(format!("Failed to start {tag}: {e}"));
+            }
         }
 
         if let Some(mut stdin) = child.stdin.take() {
@@ -140,13 +151,56 @@ impl Core {
 fn pipe(logs: Logs, tag: &'static str, stream: impl Read + Send + 'static) {
     thread::spawn(move || {
         for line in BufReader::new(stream).lines().map_while(Result::ok) {
-            let mut logs = logs.lock().unwrap();
-            if logs.len() >= MAX_LOG_LINES {
-                logs.pop_front();
-            }
-            logs.push_back(format!("[{tag}] {line}"));
+            push_log(&logs, format!("[{tag}] {line}"));
         }
     });
+}
+
+pub enum PortState {
+    Ready,
+    Waiting,
+    /// Another program listens on this port: it could pose as xray and receive the traffic
+    /// (and the SOCKS password) meant for it.
+    Taken(u16),
+}
+
+/// Whether process `pid` (xray) listens on all `ports`, and nobody else does.
+pub fn port_state(pid: u32, ports: &[u16]) -> PortState {
+    match crate::win::listener_pids(ports) {
+        Some(owners) => {
+            if let Some((port, _)) = ports.iter().zip(&owners).find(|(_, pids)| pids.iter().any(|&p| p != pid)) {
+                return PortState::Taken(*port);
+            }
+            if owners.iter().all(|pids| !pids.is_empty()) {
+                PortState::Ready
+            } else {
+                PortState::Waiting
+            }
+        }
+        // The table can't be read (not Windows): the first port accepting connections will do.
+        None => {
+            let addr = ([127, 0, 0, 1], ports[0]).into();
+            if TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok() {
+                PortState::Ready
+            } else {
+                PortState::Waiting
+            }
+        }
+    }
+}
+
+/// Adds a line to the shared log, keeping only the newest `MAX_LOG_LINES`.
+pub fn push_log(logs: &Logs, mut line: String) {
+    if line.len() > MAX_LINE_LEN {
+        let cut = (0..=MAX_LINE_LEN).rev().find(|&i| line.is_char_boundary(i)).unwrap_or(0);
+        line.truncate(cut);
+        line.push('…');
+    }
+    let mut logs = logs.lock().unwrap();
+    while logs.len() >= MAX_LOG_LINES {
+        logs.pop_front();
+    }
+    logs.push_back(line);
 }
 
 fn alive(child: &mut Option<Child>) -> Option<bool> {

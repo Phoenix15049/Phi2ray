@@ -15,7 +15,11 @@ mod imp {
     use std::ptr::{null, null_mut};
     use std::sync::OnceLock;
 
-    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_INSUFFICIENT_BUFFER, HANDLE};
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        GetExtendedTcpTable, MIB_TCPTABLE_OWNER_PID, TCP_TABLE_OWNER_PID_LISTENER,
+    };
+    use windows_sys::Win32::Networking::WinSock::AF_INET;
     use windows_sys::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
     use windows_sys::Win32::System::SystemInformation::GetSystemWindowsDirectoryW;
     use windows_sys::Win32::System::JobObjects::{
@@ -29,30 +33,76 @@ mod imp {
     /// The job handle, stored as usize because raw handles are not Send/Sync.
     static JOB: OnceLock<usize> = OnceLock::new();
 
+    /// The job, or null if it couldn't be created with "kill on close".
     fn job() -> HANDLE {
         *JOB.get_or_init(|| unsafe {
             let job = CreateJobObjectW(null(), null());
-            if !job.is_null() {
-                let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
-                info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-                SetInformationJobObject(
-                    job,
-                    JobObjectExtendedLimitInformation,
-                    &info as *const _ as *const c_void,
-                    std::mem::size_of_val(&info) as u32,
-                );
+            if job.is_null() {
+                return 0;
+            }
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let set = SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                &info as *const _ as *const c_void,
+                std::mem::size_of_val(&info) as u32,
+            );
+            if set == 0 {
+                CloseHandle(job);
+                return 0;
             }
             job as usize
         }) as HANDLE
     }
 
     /// Windows kills every process in our job when Phi2ray exits, even after a crash,
-    /// so no orphaned core keeps tunnelling traffic.
-    pub fn bind_to_app(process: *mut c_void) {
+    /// so no orphaned core keeps tunnelling traffic. A core that can't be tied to the job
+    /// must not run.
+    pub fn bind_to_app(process: *mut c_void) -> Result<(), String> {
         let job = job();
-        if !job.is_null() {
-            unsafe { AssignProcessToJobObject(job, process) };
+        if job.is_null() || unsafe { AssignProcessToJobObject(job, process) } == 0 {
+            return Err("Couldn't tie the core to Phi2ray's lifetime.".into());
         }
+        Ok(())
+    }
+
+    /// For each of `ports`, the processes listening on it on 127.0.0.1 or all addresses.
+    /// None when the table can't be read.
+    pub fn listener_pids(ports: &[u16]) -> Option<Vec<Vec<u32>>> {
+        let mut size = 0u32;
+        unsafe { GetExtendedTcpTable(null_mut(), &mut size, 0, AF_INET as u32, TCP_TABLE_OWNER_PID_LISTENER, 0) };
+        for _ in 0..4 {
+            // u32 elements keep the buffer aligned for the table's fields.
+            let mut buf = vec![0u32; size as usize / 4 + 256];
+            let mut len = (buf.len() * 4) as u32;
+            let code = unsafe {
+                GetExtendedTcpTable(buf.as_mut_ptr().cast(), &mut len, 0, AF_INET as u32, TCP_TABLE_OWNER_PID_LISTENER, 0)
+            };
+            if code == ERROR_INSUFFICIENT_BUFFER {
+                size = len;
+                continue;
+            }
+            if code != 0 {
+                return None;
+            }
+            let table = buf.as_ptr() as *const MIB_TCPTABLE_OWNER_PID;
+            let rows = unsafe { std::slice::from_raw_parts((*table).table.as_ptr(), (*table).dwNumEntries as usize) };
+            let loopback = u32::from_ne_bytes([127, 0, 0, 1]);
+            return Some(
+                ports
+                    .iter()
+                    .map(|&port| {
+                        rows.iter()
+                            .filter(|r| u16::from_be(r.dwLocalPort as u16) == port)
+                            .filter(|r| r.dwLocalAddr == loopback || r.dwLocalAddr == 0)
+                            .map(|r| r.dwOwningPid)
+                            .collect()
+                    })
+                    .collect(),
+            );
+        }
+        None
     }
 
     pub fn is_elevated() -> bool {
@@ -158,9 +208,25 @@ mod imp {
         Err("Not supported on this system.".into())
     }
 
+    pub fn listener_pids(_ports: &[u16]) -> Option<Vec<Vec<u32>>> {
+        None
+    }
+
     pub fn running_apps() -> Vec<super::RunningApp> {
         Vec::new()
     }
 }
 
 pub use imp::*;
+
+#[cfg(all(test, windows))]
+mod tests {
+    #[test]
+    fn finds_the_process_listening_on_a_port() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let owners = super::listener_pids(&[port, 1]).unwrap();
+        assert_eq!(owners[0], vec![std::process::id()]);
+        assert!(owners[1].is_empty());
+    }
+}

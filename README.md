@@ -60,8 +60,10 @@ out of your way. It ships as one `.exe`, about 45 MB, with both cores inside.
 **Not leaking**
 
 - **Kill switch.** It's a set of Windows firewall rules, not a timer that hopes for the best.
-  While it's on, nothing gets out except through the tunnel, including while it reconnects. If
-  Phi2ray ever crashes, Windows drops the rules on its own, so you can't end up locked out.
+  While it's on, nothing gets out except through the tunnel, including while it reconnects or
+  switches servers. If Phi2ray ever crashes, the block stays, so nothing leaks: open Phi2ray
+  again to reconnect or unblock. Restarting Windows always clears it too, so you can't end up
+  locked out for good.
 - **Reconnecting without letting go.** When something breaks, only the broken piece restarts and
   the tunnel stays up. Your apps wait a few seconds; they don't fall back to your real connection.
 - **DNS through the tunnel**, over HTTPS. Pick Cloudflare, Google, Quad9, AdGuard, Mullvad or

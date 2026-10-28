@@ -651,6 +651,7 @@ export default function App() {
                         </span>
                       </span>
                     ) : null}
+                    {sub.url.startsWith("http:") && <span className="group-error warn">{t("httpSubscription")}</span>}
                     {sub.lastError && <span className="group-error">{sub.lastError}</span>}
                   </>
                 ) : (
@@ -709,6 +710,11 @@ export default function App() {
                         <span className="server-meta ltr">
                           {p.stream.network}
                           {p.stream.security !== "none" && ` · ${p.stream.security}`}
+                          {p.insecure && (
+                            <span className="insecure" title={t("insecureServer")} aria-label={t("insecureServer")}>
+                              {Icon.alert()}
+                            </span>
+                          )}
                         </span>
                       </span>
                       <Latency value={delays[p.id]} />

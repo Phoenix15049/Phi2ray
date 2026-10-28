@@ -18,6 +18,7 @@ const make = (name: string, protocol: Profile["protocol"], network: string, secu
   port: 443,
   groupId,
   stream: { network, security },
+  insecure: security === "none" && protocol !== "shadowsocks",
 });
 
 let groups: Group[] = [
@@ -45,6 +46,7 @@ let profiles: Profile[] = [
   make("🇫🇮 Helsinki gRPC", "vless", "grpc", "tls", "sub1"),
   make("🇺🇸 New York Trojan", "trojan", "tcp", "tls", "sub1"),
   make("🇬🇧 London SS", "shadowsocks", "tcp", "none", "sub1"),
+  make("🇨🇦 Toronto plain", "vless", "ws", "none", "sub1"),
   make("🇫🇷 Paris Reality", "vless", "tcp", "reality", "sub1"),
 ];
 // Screenshot helpers: ?demo=connected&lang=fa&theme=light starts the mock in that state.

@@ -96,6 +96,7 @@ export const Icon = {
     ),
   down: () => svg(<path d="M12 4v15M6 13l6 6 6-6" />, 14),
   split: (size?: number) => svg(<path d="M4 12h6l4-6h6M14 18h6M10 12l4 6M17 3l3 3-3 3M17 15l3 3-3 3" />, size),
+  alert: () => svg(<path d="M12 4 2.5 20h19zM12 10v4.5M12 17.5h.01" />, 12),
   info: () =>
     svg(
       <>
