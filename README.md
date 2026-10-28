@@ -51,6 +51,9 @@ out of your way. It ships as one `.exe`, about 45 MB, with both cores inside.
   XHTTP, WebSocket, gRPC, HTTPUpgrade and plain TLS all work.
 - Subscriptions sit in their own tab and refresh by themselves. If your provider shares it, you'll
   see how much data you've used and how many days are left.
+- Servers that aren't safe get a small ⚠ next to them: no encryption to the server, or TLS that
+  doesn't check the certificate (`allowInsecure`). Subscription links over plain `http://` get a
+  warning too, since anyone on the way could read or change them.
 - Put your own servers into groups, and test a whole group at once. The test sends a real request
   through each server, so a server that's "up" but not actually working shows as failed instead
   of getting a fake 1 ms.
@@ -72,13 +75,20 @@ out of your way. It ships as one `.exe`, about 45 MB, with both cores inside.
 - Once connected, it checks that traffic actually gets through and shows the IP and country that
   websites see. If something's wrong you'll know right away, not after five minutes of loading
   spinners.
+- **Connection info** (the ⓘ button) shows your exit IP and location as several databases see it,
+  plus where the connection enters. If the entry and the exit are different servers, it tells you
+  the config goes through a relay or a CDN first. It only runs when you open it, and every lookup
+  goes through your server.
 
 **Day to day**
 
 - **Split tunnel.** Let some apps or sites skip the VPN (your bank, a game, a local site), or flip
-  it so only the ones you choose use it. You can pick apps straight from what's running.
+  it so only the ones you choose use it. You can pick apps straight from what's running. A small
+  icon next to the kill switch lock shows when it's on.
 - Live download and upload speed, and how much you've used this session.
 - Sits in the tray. Minimizing hides it there, and if you close it while connected, it asks first.
+  A dot on the tray icon tells you the state at a glance: blue when connected, orange while
+  reconnecting, red when the kill switch is holding the internet blocked, none when off.
 - Dark and light themes, and a full Persian interface.
 
 ## Getting started
@@ -118,9 +128,15 @@ almost certainly have it already.
   or change anything. Each file is checked against the hash recorded at build time and then kept
   open with writing blocked until Phi2ray exits, so what runs is exactly what was checked. Since
   Phi2ray runs as admin, this stops other programs from swapping a core to get admin rights.
+- Before Xray counts as started, Phi2ray checks that its local ports really belong to it, so
+  another program can't grab a port first and pose as the proxy.
+- Subscriptions are capped at 8 MB and 2000 servers, and a redirect from `https` to `http` is
+  refused. The window itself never receives your servers' passwords or IDs.
 
 There's no telemetry, no analytics and no update check. The only requests Phi2ray makes on its
 own are the connection check while you're connected and the subscription updates you added.
+Connection info asks ipapi.co, DB-IP, FreeIPAPI and Cloudflare, but only when you open it, and
+through your server.
 
 ## Building it yourself
 
@@ -165,6 +181,7 @@ src-tauri/src/
   parser.rs             share links and subscriptions
   subscription.rs       downloading and merging subscriptions
   cores.rs              unpacking the bundled cores safely
+  netinfo.rs            the connection info lookup
 src-tauri/core/         Xray and sing-box binaries (not in git)
 ```
 </details>
