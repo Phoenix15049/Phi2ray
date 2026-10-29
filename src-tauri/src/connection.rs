@@ -6,7 +6,7 @@
 //! - With the kill switch on, the firewall stays up through every restart, and even after
 //!   giving up, until the user disconnects.
 
-use std::net::{IpAddr, SocketAddr, TcpListener, ToSocketAddrs};
+use std::net::{IpAddr, TcpListener, ToSocketAddrs};
 use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -18,7 +18,7 @@ use serde_json::Value;
 use tauri::{AppHandle, Manager};
 
 use crate::parser::Profile;
-use crate::probe::{self, ExitInfo, Via};
+use crate::probe::{self, ExitInfo, LocalProxy, Via};
 use crate::split::SplitMode;
 use crate::store::{Mode, Settings};
 use crate::xray::{SING_BOX_EXE, XRAY_EXE};
@@ -56,7 +56,10 @@ pub struct Session {
     pub mode: Mode,
     pub socks_port: u16,
     pub http_port: u16,
+    /// Never sent with the status the window polls; only on request (copying the SOCKS link).
+    #[serde(skip_serializing)]
     pub socks_user: String,
+    #[serde(skip_serializing)]
     pub socks_pass: String,
     /// Unix time in milliseconds.
     pub started_at: u64,
@@ -116,12 +119,12 @@ pub struct Link {
     test_url: String,
     metrics_port: u16,
     /// xray's local listening ports, SOCKS first (what sing-box connects to).
-    local_ports: [u16; 4],
+    local_ports: Vec<u16>,
     /// Probes go straight through the tunnel (VPN mode), testing the whole path apps use.
     /// Not when split tunnelling only sends listed apps through it: Phi2ray itself isn't one.
     probe_direct: bool,
     /// xray's probe inbound, which always goes to the server.
-    probe_proxy: Via,
+    probe_proxy: LocalProxy,
     /// The server as configured, and the IP xray dials when it was looked up beforehand.
     server_address: String,
     server_port: u16,
@@ -133,14 +136,19 @@ impl Link {
         if self.probe_direct {
             Via::Direct
         } else {
-            self.probe_proxy.clone()
+            Via::Proxy(self.probe_proxy.clone())
         }
     }
 }
 
+/// Phi2ray's own way through the server, for subscription downloads and DNS tests.
+pub fn internal_proxy(state: &AppState) -> Option<LocalProxy> {
+    state.link.lock().unwrap().as_ref().map(|l| l.probe_proxy.clone())
+}
+
 /// What the connection info lookup needs: a way through the server, and the server's IP.
 pub struct InfoTarget {
-    pub via: Via,
+    pub via: LocalProxy,
     pub server_address: String,
     pub server_ip: Option<IpAddr>,
 }
@@ -214,7 +222,16 @@ pub fn connect(app: &AppHandle, state: &AppState, id: &str) -> Result<Session, S
     restore_proxy(state);
     *state.link.lock().unwrap() = None;
 
-    match start(state, &profile, &settings, &original_address, server_ip) {
+    let mut result = start(state, &profile, &settings, &original_address, server_ip);
+    if let Err(e) = &result {
+        // Random ports: someone grabbed one in the moment before xray did. New ports, once.
+        if e.starts_with(crate::xray::PORT_TAKEN) && !settings.fixed_ports {
+            log(state, format!("[app] {e} Retrying with new ports."));
+            state.core.lock().unwrap().stop();
+            result = start(state, &profile, &settings, &original_address, server_ip);
+        }
+    }
+    match result {
         Ok(link) => {
             let session = link.session.clone();
             *state.link.lock().unwrap() = Some(link);
@@ -295,6 +312,7 @@ fn start(
             socks_user: &session.socks_user,
             socks_pass: &session.socks_pass,
             server_ip,
+            xray_exe: &state.paths.xray(),
             settings,
         })?),
         _ => None,
@@ -302,10 +320,14 @@ fn start(
 
     log(state, format!("[app] Connecting to {} ({:?} mode)", profile.name, settings.mode));
     let mut core = state.core.lock().unwrap();
-    let local_ports = [socks_port, http_port, probe_port, metrics_port];
+    // VPN mode has no HTTP inbound: nothing needs it, and it would be a password-less way in.
+    let mut local_ports = vec![socks_port, probe_port, metrics_port];
+    if settings.mode != Mode::Tun {
+        local_ports.push(http_port);
+    }
     core.start_xray(&state.paths.xray(), &state.paths.core, &xray_cfg, &local_ports)?;
     match (&tun_cfg, settings.mode) {
-        (Some(cfg), _) => core.start_tun(&state.paths.sing_box(), &state.paths.data.join("sing-box"), cfg)?,
+        (Some(cfg), _) => core.start_tun(&state.paths.sing_box(), &state.paths.work, cfg)?,
         (None, Mode::System) => proxy::enable(http_port, &state.paths.proxy_marker)?,
         _ => {}
     }
@@ -319,7 +341,7 @@ fn start(
         metrics_port,
         local_ports,
         probe_direct,
-        probe_proxy: Via::Proxy { port: probe_port, user: probe_user, pass: probe_pass },
+        probe_proxy: LocalProxy { port: probe_port, user: probe_user, pass: probe_pass },
         server_address: original_address.to_string(),
         server_port: profile.port,
         server_ip,
@@ -508,7 +530,7 @@ fn restart(state: &AppState, xray: bool, tun: bool) -> Result<(), String> {
     let (xray_cfg, tun_cfg, local_ports) = {
         let link = state.link.lock().unwrap();
         let link = link.as_ref().ok_or("Not connected.")?;
-        (link.xray_cfg.clone(), link.tun_cfg.clone(), link.local_ports)
+        (link.xray_cfg.clone(), link.tun_cfg.clone(), link.local_ports.clone())
     };
     if xray {
         crate::verify_cached(state, &state.paths.xray())?;
@@ -521,7 +543,7 @@ fn restart(state: &AppState, xray: bool, tun: bool) -> Result<(), String> {
         core.start_xray(&state.paths.xray(), &state.paths.core, &xray_cfg, &local_ports)?;
     }
     if let (true, Some(cfg)) = (tun, &tun_cfg) {
-        core.start_tun(&state.paths.sing_box(), &state.paths.data.join("sing-box"), cfg)?;
+        core.start_tun(&state.paths.sing_box(), &state.paths.work, cfg)?;
     }
     drop(core);
     if let Some(link) = state.link.lock().unwrap().as_mut() {
@@ -565,17 +587,26 @@ fn resolve_server(state: &AppState, address: &str, port: u16) -> Result<IpAddr, 
     if let Ok(ip) = address.parse::<IpAddr>() {
         return Ok(ip);
     }
-    let lookup = (address, port).to_socket_addrs().map(|addrs| {
-        let addrs: Vec<SocketAddr> = addrs.collect();
-        addrs.iter().find(|a| a.is_ipv4()).or(addrs.first()).map(|a| a.ip())
-    });
-    let mut cache = state.resolved.lock().unwrap();
-    match lookup {
-        Ok(Some(ip)) => {
-            cache.insert(address.to_string(), ip);
+    let answers: Vec<IpAddr> = (address, port).to_socket_addrs().map(|a| a.map(|a| a.ip()).collect()).unwrap_or_default();
+    // A filtered domain can come back as a private or reserved address (Iranian DNS answers
+    // 10.10.34.36, for example). That's never the real server, so it's neither used nor kept.
+    let public: Vec<IpAddr> = answers.iter().copied().filter(|ip| crate::netinfo::is_public(*ip)).collect();
+    let mut store = state.store.lock().unwrap();
+    match public.iter().find(|ip| ip.is_ipv4()).or(public.first()) {
+        Some(&ip) => {
+            if store.resolved.get(address) != Some(&ip) {
+                store.resolved.insert(address.to_string(), ip);
+                let _ = store.save(&state.paths.store);
+            }
             Ok(ip)
         }
-        _ => cache.get(address).copied().ok_or_else(|| format!("Cannot resolve server {address}")),
+        None => store.resolved.get(address).copied().ok_or_else(|| {
+            if answers.is_empty() {
+                format!("Cannot resolve server {address}")
+            } else {
+                format!("DNS gave a fake address for {address} (it's probably filtered). Try another DNS or connect once on a network where it works.")
+            }
+        }),
     }
 }
 
@@ -589,7 +620,8 @@ pub fn pin_address(p: &Profile, ip: IpAddr) -> Profile {
     let domain = std::mem::replace(&mut p.address, ip.to_string());
     let s = &mut p.stream;
     if s.security == "tls" && s.sni.is_empty() {
-        s.sni = domain.clone();
+        // Same choice as config::stream makes unpinned: the Host header first, then the address.
+        s.sni = if s.host.is_empty() { domain.clone() } else { s.host.clone() };
     }
     if matches!(s.network.as_str(), "ws" | "httpupgrade" | "xhttp") && s.host.is_empty() {
         s.host = domain;
@@ -665,5 +697,17 @@ mod tests {
         assert_eq!((p.stream.sni.as_str(), p.stream.host.as_str()), ("s.com", "h.com"));
         let p = pin_address(&parse_link("trojan://pw@198.51.100.1:443").unwrap(), ip);
         assert_eq!(p.address, "198.51.100.1");
+
+        // A clean CDN address with a different Host: pinning must not change the SNI.
+        let link = "vless://id@clean.com:443?type=ws&security=tls&host=worker.dev";
+        let sni = |p: &Profile| {
+            let inb = crate::config::tests::inbounds();
+            crate::config::build(p, &inb, &Settings::default(), &crate::config::Assets { geoip: false, geosite: false })
+                ["outbounds"][0]["streamSettings"]["tlsSettings"]["serverName"]
+                .clone()
+        };
+        let plain = parse_link(link).unwrap();
+        assert_eq!(sni(&plain), "worker.dev");
+        assert_eq!(sni(&pin_address(&plain, ip)), sni(&plain));
     }
 }

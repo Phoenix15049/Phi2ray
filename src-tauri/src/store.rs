@@ -176,6 +176,9 @@ pub struct Store {
     pub groups: Vec<Group>,
     pub profiles: Vec<Profile>,
     pub settings: Settings,
+    /// Last good IP of each server address. Reconnecting still works when DNS can't be
+    /// reached, for example while the kill switch holds the internet blocked after a crash.
+    pub resolved: std::collections::HashMap<String, std::net::IpAddr>,
 }
 
 impl Store {
@@ -192,8 +195,12 @@ impl Store {
                 store
             }
             Err(_) => {
-                // Keep the unreadable file instead of silently overwriting it.
-                let _ = fs::rename(path, path.with_extension("bak"));
+                // Keep the unreadable file instead of silently overwriting it (or an older backup).
+                let stamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let _ = fs::rename(path, path.with_extension(format!("{stamp}.bak")));
                 Self::fresh()
             }
         }
@@ -235,6 +242,8 @@ impl Store {
     pub fn save(&self, path: &Path) -> Result<(), String> {
         let json = serde_json::to_vec(self).map_err(|e| e.to_string())?;
         let tmp = path.with_extension("tmp");
+        crate::win::check_write_target(path)?;
+        crate::win::check_write_target(&tmp)?;
         fs::write(&tmp, dpapi::protect(&json)?).map_err(|e| e.to_string())?;
         fs::rename(&tmp, path).map_err(|e| e.to_string())
     }

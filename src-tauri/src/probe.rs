@@ -14,14 +14,29 @@ const MAX_BODY: usize = 16 * 1024;
 /// Plain-HTTP endpoint that reports the caller's public IP and country.
 const TRACE_URL: &str = "http://1.1.1.1/cdn-cgi/trace";
 
+/// xray's password-protected probe inbound: Phi2ray's own way through the server. It always
+/// goes to the server, whatever the split tunnel says, and other programs can't use it.
+#[derive(Clone)]
+pub struct LocalProxy {
+    pub port: u16,
+    pub user: String,
+    pub pass: String,
+}
+
+impl LocalProxy {
+    pub fn for_reqwest(&self) -> Result<reqwest::Proxy, String> {
+        let proxy = reqwest::Proxy::all(format!("http://127.0.0.1:{}", self.port)).map_err(|e| e.to_string())?;
+        Ok(proxy.basic_auth(&self.user, &self.pass))
+    }
+}
+
 /// How a probe reaches the internet.
 #[derive(Clone)]
 pub enum Via {
     /// Straight from this process. In VPN mode that means through the tunnel, which
     /// tests the whole path apps use (adapter, routing, DNS, xray, server).
     Direct,
-    /// Through xray's password-protected probe inbound, which always goes to the server.
-    Proxy { port: u16, user: String, pass: String },
+    Proxy(LocalProxy),
 }
 
 #[derive(Clone, Serialize)]
@@ -31,10 +46,11 @@ pub struct ExitInfo {
     pub country: Option<String>,
 }
 
-/// Fetches `url` and returns the time to the response headers, if the status was 2xx/3xx.
+/// Fetches `url` and returns the time to the response headers, if the status was 2xx.
+/// Redirects don't count: a captive portal (hotel or café Wi-Fi login) answers with one.
 pub fn check(url: &str, via: &Via) -> Option<u32> {
     let (ms, status, _) = get(url, via, MAX_BODY)?;
-    (200..400).contains(&status).then_some(ms)
+    (200..300).contains(&status).then_some(ms)
 }
 
 pub fn exit_info(via: &Via) -> Option<ExitInfo> {
@@ -90,10 +106,10 @@ fn get(url: &str, via: &Via, max_body: usize) -> Option<(u32, u16, String)> {
             };
             (TcpStream::connect_timeout(&addr, TIMEOUT).ok()?, path)
         }
-        Via::Proxy { port, user, pass } => {
-            let credentials = base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pass}"));
+        Via::Proxy(p) => {
+            let credentials = base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", p.user, p.pass));
             proxy_auth = format!("Proxy-Authorization: Basic {credentials}\r\n");
-            let addr = ([127, 0, 0, 1], *port).into();
+            let addr = ([127, 0, 0, 1], p.port).into();
             (TcpStream::connect_timeout(&addr, TIMEOUT).ok()?, url.to_string())
         }
     };
@@ -123,27 +139,39 @@ fn get(url: &str, via: &Via, max_body: usize) -> Option<(u32, u16, String)> {
             Err(_) => return None,
         }
     }
-    let text = String::from_utf8_lossy(&buf);
-    let status = text.strip_prefix("HTTP/1.")?.get(2..5)?.parse().ok()?;
-    let (head, body) = text.split_once("\r\n\r\n").unwrap_or((&text, ""));
-    let chunked = head.lines().any(|l| {
-        let l = l.to_ascii_lowercase();
-        l.starts_with("transfer-encoding:") && l.contains("chunked")
-    });
-    let body = if chunked { dechunk(body) } else { body.to_string() };
+    let (status, body) = parse_response(&buf)?;
     Some((first_byte_ms?, status, body))
 }
 
+/// Splits a raw HTTP/1.x response into status and body. Works on bytes until the very end,
+/// so a hostile or broken response (bad sizes, invalid UTF-8) can't make it panic.
+fn parse_response(raw: &[u8]) -> Option<(u16, String)> {
+    let status = std::str::from_utf8(raw.strip_prefix(b"HTTP/1.")?.get(2..5)?).ok()?.parse().ok()?;
+    let split = raw.windows(4).position(|w| w == b"\r\n\r\n");
+    let (head, body) = match split {
+        Some(i) => (&raw[..i], &raw[i + 4..]),
+        None => (raw, &[][..]),
+    };
+    let chunked = String::from_utf8_lossy(head).lines().any(|l| {
+        let l = l.to_ascii_lowercase();
+        l.starts_with("transfer-encoding:") && l.contains("chunked")
+    });
+    let body = if chunked { dechunk(body) } else { body.to_vec() };
+    Some((status, String::from_utf8_lossy(&body).into_owned()))
+}
+
 /// Decodes a `Transfer-Encoding: chunked` body (Go's HTTP server uses it for large responses).
-fn dechunk(mut body: &str) -> String {
-    let mut out = String::new();
-    while let Some((size_line, rest)) = body.split_once("\r\n") {
+fn dechunk(mut body: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    while let Some(line_end) = body.windows(2).position(|w| w == b"\r\n") {
+        let size_line = String::from_utf8_lossy(&body[..line_end]);
         let size = usize::from_str_radix(size_line.split(';').next().unwrap_or("").trim(), 16).unwrap_or(0);
+        let rest = &body[line_end + 2..];
         if size == 0 || rest.len() < size {
             break;
         }
-        out.push_str(&rest[..size]);
-        body = rest[size..].strip_prefix("\r\n").unwrap_or(&rest[size..]);
+        out.extend_from_slice(&rest[..size]);
+        body = rest[size..].strip_prefix(b"\r\n").unwrap_or(&rest[size..]);
     }
     out
 }
@@ -170,7 +198,31 @@ mod tests {
 
     #[test]
     fn chunked_bodies() {
-        assert_eq!(dechunk("5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n"), "hello world");
-        assert_eq!(dechunk("a;ext=1\r\n0123456789\r\n0\r\n\r\n"), "0123456789");
+        assert_eq!(dechunk(b"5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n"), b"hello world");
+        assert_eq!(dechunk(b"a;ext=1\r\n0123456789\r\n0\r\n\r\n"), b"0123456789");
+    }
+
+    #[test]
+    fn hostile_responses_never_panic() {
+        // A chunk size that ends inside a multi-byte character used to crash the app.
+        let (status, body) = parse_response("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\r\né\r\n0\r\n\r\n".as_bytes()).unwrap();
+        assert_eq!((status, body.chars().count()), (200, 1));
+        assert!(parse_response(b"HTTP/1.1 2\xff\xfe").is_none());
+        assert!(parse_response(b"garbage").is_none());
+        let huge = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nffffffffffffffff\r\nabc";
+        assert_eq!(parse_response(huge).unwrap().1, "");
+        // Random bytes, including invalid UTF-8 and stray CRLFs.
+        let mut seed = 0x2545_f491_u32;
+        for _ in 0..2000 {
+            let len = (seed % 64) as usize;
+            let mut raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec();
+            for _ in 0..len {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                raw.push([b'1', b'f', b'\r', b'\n', 0xc3, 0xa9, 0xff, b';'][(seed % 8) as usize]);
+            }
+            let _ = parse_response(&raw);
+        }
     }
 }

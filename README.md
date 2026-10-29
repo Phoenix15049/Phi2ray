@@ -66,12 +66,18 @@ out of your way. It ships as one `.exe`, about 45 MB, with both cores inside.
   While it's on, nothing gets out except through the tunnel, including while it reconnects or
   switches servers. If Phi2ray ever crashes, the block stays, so nothing leaks: open Phi2ray
   again to reconnect or unblock. Restarting Windows always clears it too, so you can't end up
-  locked out for good.
+  locked out for good. The flip side: it's off from the moment Windows starts until Phi2ray
+  does. It's there to catch accidental leaks, not to fight malware already running on your PC.
 - **Reconnecting without letting go.** When something breaks, only the broken piece restarts and
   the tunnel stays up. Your apps wait a few seconds; they don't fall back to your real connection.
 - **DNS through the tunnel**, over HTTPS. Pick Cloudflare, Google, Quad9, AdGuard, Mullvad or
   another one, and hit *Test* to see which answers fastest from where you are.
-- Local proxy ports are random each time, and SOCKS always asks for a username and password.
+- Local proxy ports are random each time and only reachable from this PC. SOCKS always asks for
+  a username and password, and in VPN mode there's no HTTP port at all. (In the proxy modes the
+  HTTP port has no password, because Windows has no way to hand one to apps.)
+- In System proxy mode, Windows' automatic proxy detection (WPAD) and setup scripts are switched
+  off while you're connected and put back afterwards, so a fake one on public Wi-Fi can't send
+  your browser around the proxy.
 - Once connected, it checks that traffic actually gets through and shows the IP and country that
   websites see. If something's wrong you'll know right away, not after five minutes of loading
   spinners.
@@ -120,10 +126,13 @@ almost certainly have it already.
   connection to Xray, which means any transport Xray supports also works in VPN mode.
 - **Xray** talks to your server. Its own connection to the server is routed around the tunnel by
   Windows itself, so it can't accidentally loop back into it.
-- The **kill switch** allows only the tunnel, the two cores, DHCP, and your local network if you
-  want printers and the router to stay reachable. Everything else is blocked.
+- The **kill switch** allows only the tunnel, the two cores (and only as Phi2ray starts them,
+  with administrator rights), DHCP, and your local network if you want printers and the router
+  to stay reachable. Everything else is blocked.
 - Your server details are handed to the cores through stdin and never written to disk as plain
-  text. Saved servers and settings are encrypted with your Windows account (DPAPI).
+  text. Saved servers and settings are encrypted with your Windows account (DPAPI). That keeps
+  them safe if the file is copied somewhere else; programs running as you on this PC can still
+  read them, as with any app.
 - The cores are unpacked into `C:\Program Files\Phi2ray`, where only administrators can create
   or change anything. Each file is checked against the hash recorded at build time and then kept
   open with writing blocked until Phi2ray exits, so what runs is exactly what was checked. Since
@@ -131,12 +140,29 @@ almost certainly have it already.
 - Before Xray counts as started, Phi2ray checks that its local ports really belong to it, so
   another program can't grab a port first and pose as the proxy.
 - Subscriptions are capped at 8 MB and 2000 servers, and a redirect from `https` to `http` is
-  refused. The window itself never receives your servers' passwords or IDs.
+  refused. Plain `http://` subscriptions don't update by themselves. Error messages never
+  include a subscription link or a server's password, so logs are safe to share. The window
+  itself never receives your servers' passwords or IDs.
+- While connected, subscription updates and the DNS test always go through your server, even
+  when the split tunnel would send other traffic directly.
+- When DNS answers a filtered server with a fake private address (like `10.10.34.36`), Phi2ray
+  ignores it. The last good address of each server is remembered, so reconnecting still works
+  when DNS can't be reached.
+
+**What doesn't go through the tunnel**, so there are no surprises:
+
+- Your local network (router, printers, other PCs), while *Bypass local network* is on.
+- Apps and sites you exclude with split tunnel, or with *Only via VPN*, everything you didn't list.
+- Iranian sites, if you turn that option on.
+- Anything addressed to your server's own IP. That's how the tunnel itself gets out; it only
+  matters if your server sits behind a CDN address that other sites share.
+- *Test* on the server list connects straight to each server, as every client does. It's the
+  same connection the server sees when you use it.
 
 There's no telemetry, no analytics and no update check. The only requests Phi2ray makes on its
 own are the connection check while you're connected and the subscription updates you added.
-Connection info asks ipapi.co, DB-IP, FreeIPAPI and Cloudflare, but only when you open it, and
-through your server.
+Connection info asks ipapi.co, DB-IP, FreeIPAPI and Cloudflare (including where your server is),
+but only when you open it, and through your server.
 
 ## Building it yourself
 
@@ -156,6 +182,11 @@ The cores aren't in the repo, so download them and drop them into `src-tauri/cor
   [Xray-core releases page](https://github.com/XTLS/Xray-core/releases)
 - `sing-box.exe` from `sing-box-<version>-windows-amd64.zip` on the
   [sing-box releases page](https://github.com/SagerNet/sing-box/releases)
+
+`src-tauri/core/SHA256SUMS` pins the exact files the release embeds, and the build stops if
+anything in that folder doesn't match. If you update a core, check it against the digests on its
+release page and update `SHA256SUMS` too. Releases are always built with `npm run build:exe`;
+a release build without the embedded cores is refused on purpose.
 
 ```bash
 # Development (open the terminal as administrator if you want to try VPN mode)

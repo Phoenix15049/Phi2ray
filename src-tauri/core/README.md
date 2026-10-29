@@ -12,5 +12,17 @@ needed only for VPN mode:
 
 - `sing-box.exe`
 
-Optional: `xray.exe.sha256` / `sing-box.exe.sha256` containing the expected SHA-256.
-If present, Phi2ray refuses to start a core whose hash does not match.
+`SHA256SUMS` pins the exact files a release embeds; `npm run build:exe` fails if any file here
+doesn't match it. When you update a core, check the new files against the `.dgst` digests on
+the official release page first, then update `SHA256SUMS`:
+
+```bash
+cd src-tauri/core
+sha256sum geoip.dat geosite.dat libcronet.dll sing-box.exe xray.exe > SHA256SUMS
+```
+
+Release builds always embed the cores (`npm run build:exe`). A release without them would run
+cores from a folder normal users can write to, while Phi2ray runs as administrator.
+
+For development builds, `xray.exe.sha256` / `sing-box.exe.sha256` next to a core are optional;
+if present, Phi2ray refuses to start a core whose hash does not match.

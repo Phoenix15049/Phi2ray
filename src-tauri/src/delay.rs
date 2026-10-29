@@ -95,9 +95,9 @@ pub async fn measure(port: u16, target: &TestTarget) -> Option<u32> {
     is_success(&buf[..n]).then_some(elapsed)
 }
 
-/// True for an HTTP 2xx/3xx status line.
+/// True for an HTTP 2xx status line. Redirects don't count (captive portals answer with one).
 fn is_success(head: &[u8]) -> bool {
-    head.starts_with(b"HTTP/1.") && matches!(head.get(9), Some(b'2' | b'3'))
+    head.starts_with(b"HTTP/1.") && matches!(head.get(9), Some(b'2'))
 }
 
 #[cfg(test)]
@@ -107,7 +107,7 @@ mod tests {
     #[test]
     fn status_line() {
         assert!(is_success(b"HTTP/1.1 204 No Content\r\n"));
-        assert!(is_success(b"HTTP/1.0 301 Moved"));
+        assert!(!is_success(b"HTTP/1.0 302 Found"));
         assert!(!is_success(b"HTTP/1.1 502 Bad Gateway"));
         assert!(!is_success(b""));
     }

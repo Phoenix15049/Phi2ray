@@ -304,6 +304,7 @@ export default function App() {
       await reload();
       setActiveGroup(r.groupId);
       toast("info", `${t("added")}: ${r.count}${r.skipped ? ` · ${r.skipped} ${t("unsupportedSkipped")}` : ""}`);
+      if (url.trim().toLowerCase().startsWith("http:")) toast("error", t("httpSubscriptionAdded"));
       return true;
     } catch (e) {
       toast("error", String(e));
@@ -429,7 +430,6 @@ export default function App() {
   const selected = profiles.find((p) => p.id === settings.selected);
   const group = groups.find((g) => g.id === activeGroup);
   const sub = group?.subscription;
-  const socksUrl = session && `socks5://${session.socksUser}:${session.socksPass}@127.0.0.1:${session.socksPort}`;
   const health = session?.health;
   const traffic = session?.traffic;
   const unhealthy = phase === "connected" && health && !health.ok;
@@ -585,7 +585,7 @@ export default function App() {
                 <span>HTTP</span>
                 <span className="ltr">127.0.0.1:{session.httpPort}</span> {Icon.copy()}
               </button>
-              <button className="endpoint" onClick={() => copy(socksUrl!)}>
+              <button className="endpoint" onClick={() => api.socksUrl().then(copy, (e) => toast("error", String(e)))}>
                 <span>SOCKS</span>
                 <span className="ltr">127.0.0.1:{session.socksPort}</span> {Icon.copy()}
               </button>
@@ -711,7 +711,11 @@ export default function App() {
                           {p.stream.network}
                           {p.stream.security !== "none" && ` · ${p.stream.security}`}
                           {p.insecure && (
-                            <span className="insecure" title={t("insecureServer")} aria-label={t("insecureServer")}>
+                            <span
+                              className="insecure"
+                              title={t(p.insecure === "unencrypted" ? "insecureUnencrypted" : "insecureUnverified")}
+                              aria-label={t(p.insecure === "unencrypted" ? "insecureUnencrypted" : "insecureUnverified")}
+                            >
                               {Icon.alert()}
                             </span>
                           )}

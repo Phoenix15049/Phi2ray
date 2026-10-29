@@ -12,15 +12,15 @@ const TEST_NAME: &str = "www.google.com";
 
 /// Milliseconds for one lookup over an already-open connection (what browsing feels like),
 /// or an error message for servers that can't be tested.
-pub async fn ping(address: &str, proxy_port: Option<u16>) -> Result<Option<u32>, String> {
+pub async fn ping(address: &str, proxy: Option<&crate::probe::LocalProxy>) -> Result<Option<u32>, String> {
     let url = url::Url::parse(address.trim()).map_err(|_| "Only DNS-over-HTTPS servers can be tested.".to_string())?;
     if url.scheme() != "https" {
         return Err("Only DNS-over-HTTPS servers can be tested.".into());
     }
 
     let mut client = reqwest::Client::builder().timeout(TIMEOUT);
-    client = match proxy_port {
-        Some(port) => client.proxy(reqwest::Proxy::all(format!("http://127.0.0.1:{port}")).map_err(|e| e.to_string())?),
+    client = match proxy {
+        Some(p) => client.proxy(p.for_reqwest()?),
         None => client.no_proxy(),
     };
     let client = client.build().map_err(|e| e.to_string())?;

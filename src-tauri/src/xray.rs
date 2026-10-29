@@ -27,6 +27,8 @@ pub const SING_BOX_EXE: &str = "sing-box";
 pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 const MAX_LOG_LINES: usize = 1000;
+/// Starts the error returned when another program holds one of xray's ports.
+pub const PORT_TAKEN: &str = "Local port";
 /// Longer lines are cut, so one runaway message can't take much memory.
 const MAX_LINE_LEN: usize = 2000;
 
@@ -63,7 +65,7 @@ impl Core {
                 PortState::Ready => break,
                 PortState::Taken(port) => {
                     kill(child);
-                    return Err(format!("Local port {port} is being used by another program. Connect again to use new ports."));
+                    return Err(format!("{PORT_TAKEN} {port} is being used by another program. Connect again to use new ports."));
                 }
                 PortState::Waiting => {}
             }

@@ -13,7 +13,7 @@ export type Profile = {
   groupId: string;
   stream: { network: string; security: string };
   /** Not encrypted to the server, or its TLS certificate isn't checked. */
-  insecure: boolean;
+  insecure: "unencrypted" | "unverified" | null;
 };
 
 export type Subscription = {
@@ -85,8 +85,6 @@ export type Session = {
   mode: Mode;
   socksPort: number;
   httpPort: number;
-  socksUser: string;
-  socksPass: string;
   startedAt: number;
   state: "connected" | "reconnecting";
   health: Health | null;
@@ -180,6 +178,8 @@ export const api = {
   status: () => backend.call<Status>("status"),
   checkConnection: () => backend.call<Health>("check_connection"),
   connectionInfo: () => backend.call<ConnectionInfo>("connection_info"),
+  /** The SOCKS link including its password; fetched only when the user copies it. */
+  socksUrl: () => backend.call<string>("socks_url"),
   getLogs: () => backend.call<string[]>("get_logs"),
   clearLogs: () => backend.call<void>("clear_logs"),
   testDelays: (ids: string[] = []) => backend.call<void>("test_delays", { ids }),

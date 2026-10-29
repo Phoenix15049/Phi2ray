@@ -155,7 +155,7 @@ const en = {
   connectOnLaunch: "Connect on launch",
   connectOnLaunchHint: "Reconnect to the selected server when Phi2ray opens.",
   protection: "Protection",
-  killSwitchHint: "Blocks all internet outside Phi2ray while connected or reconnecting, so your real IP never leaks. Needs administrator rights.",
+  killSwitchHint: "Blocks all internet outside Phi2ray while connected or reconnecting, so your real IP doesn't leak. If Phi2ray closes unexpectedly the block stays; restarting Windows lifts it, and it isn't active before Phi2ray starts. Needs administrator rights.",
   autoReconnect: "Auto-reconnect",
   autoReconnectHint: "If the connection drops, recover it without ever exposing your network.",
   routing: "Routing",
@@ -210,7 +210,9 @@ const en = {
   coresFolder: "Cores",
   dataFolder: "Data",
   splitActive: "Split tunnel is on",
-  insecureServer: "Not safe: traffic to this server isn't encrypted, or its certificate isn't checked.",
+  insecureUnencrypted: "Not safe: traffic to this server isn't encrypted.",
+  insecureUnverified: "Not safe: the server's certificate isn't checked, so someone else could pose as it.",
+  httpSubscriptionAdded: "This subscription uses an unencrypted (http) link, so it won't update by itself. Use an https link if your provider has one.",
   httpSubscription: "Unencrypted link (http): anyone on the path can read or change this list.",
   madeBy: "Made by",
   connectionInfo: "Connection info",
@@ -237,7 +239,7 @@ const en = {
   infoEntryNetwork: "Entry network",
   infoExitIp: "Exit IP",
   infoDatabases: "Location by database",
-  infoHint: "Checked through your server, only when you open this page. Databases often disagree on the city; the IP and country matter more. Only the first and last hop are visible, so there may be more in between.",
+  infoHint: "Checked through your server, only when you open this page; your server's own address is looked up too. Databases often disagree on the city; the IP and country matter more. Only the first and last hop are visible, so there may be more in between.",
 };
 
 export type StringKey = keyof typeof en;
@@ -387,7 +389,7 @@ const fa: Record<StringKey, string> = {
   connectOnLaunch: "اتصال هنگام اجرا",
   connectOnLaunchHint: "با باز شدن Phi2ray به سرور انتخاب‌شده وصل شود.",
   protection: "محافظت",
-  killSwitchHint: "هنگام اتصال یا اتصال مجدد، هر ترافیکی خارج از Phi2ray را مسدود می‌کند تا IP واقعی شما هرگز لو نرود. به دسترسی ادمین نیاز دارد.",
+  killSwitchHint: "هنگام اتصال یا اتصال مجدد، هر ترافیکی خارج از Phi2ray را مسدود می‌کند تا IP واقعی شما لو نرود. اگر برنامه ناگهان بسته شود مسدودسازی باقی می‌ماند؛ ری‌استارت ویندوز آن را برمی‌دارد و پیش از باز شدن Phi2ray فعال نیست. به دسترسی ادمین نیاز دارد.",
   autoReconnect: "اتصال مجدد خودکار",
   autoReconnectHint: "اگر اتصال قطع شد، بدون لو رفتن شبکه شما دوباره برقرار می‌شود.",
   routing: "مسیریابی",
@@ -442,7 +444,9 @@ const fa: Record<StringKey, string> = {
   coresFolder: "هسته‌ها",
   dataFolder: "داده‌ها",
   splitActive: "تونل جداگانه فعال است",
-  insecureServer: "ناامن: ترافیک تا این سرور رمزنگاری نمی‌شود یا گواهی آن بررسی نمی‌شود.",
+  insecureUnencrypted: "ناامن: ترافیک تا این سرور رمزنگاری نمی‌شود.",
+  insecureUnverified: "ناامن: گواهی سرور بررسی نمی‌شود، پس ممکن است کس دیگری خودش را جای سرور جا بزند.",
+  httpSubscriptionAdded: "این ساب‌اسکریپشن لینک بدون رمزنگاری (http) دارد، پس خودکار به‌روز نمی‌شود. اگر ارائه‌دهنده لینک https دارد، از آن استفاده کنید.",
   httpSubscription: "لینک بدون رمزنگاری (http): هر کسی در مسیر می‌تواند این فهرست را ببیند یا تغییر دهد.",
   madeBy: "ساخته‌شده توسط",
   connectionInfo: "اطلاعات اتصال",
@@ -469,7 +473,7 @@ const fa: Record<StringKey, string> = {
   infoEntryNetwork: "شبکهٔ ورودی",
   infoExitIp: "IP خروجی",
   infoDatabases: "موقعیت از نگاه هر پایگاه داده",
-  infoHint: "این اطلاعات فقط وقتی این صفحه را باز می‌کنید و از طریق سرور بررسی می‌شود. پایگاه‌های داده معمولاً در مورد شهر با هم اختلاف دارند؛ IP و کشور مهم‌ترند. فقط اولین و آخرین نقطهٔ مسیر دیده می‌شود، پس ممکن است نقاط دیگری هم در میان باشد.",
+  infoHint: "این اطلاعات فقط وقتی این صفحه را باز می‌کنید و از طریق سرور بررسی می‌شود و آدرس خود سرور هم استعلام می‌شود. پایگاه‌های داده معمولاً در مورد شهر با هم اختلاف دارند؛ IP و کشور مهم‌ترند. فقط اولین و آخرین نقطهٔ مسیر دیده می‌شود، پس ممکن است نقاط دیگری هم در میان باشد.",
 };
 
 const tables: Record<Lang, Record<StringKey, string>> = { en, fa };

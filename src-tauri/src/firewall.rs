@@ -1,7 +1,9 @@
 //! Kill switch, built on the Windows Filtering Platform (as Windscribe, Mullvad and
 //! WireGuard do). While on, every connection is blocked except:
 //! - loopback (local proxy ports),
-//! - xray and sing-box themselves (they reach the server and route bypassed traffic),
+//! - xray and sing-box themselves (they reach the server and route bypassed traffic), but only
+//!   when running with administrator rights as Phi2ray starts them: a copy launched by an
+//!   ordinary program doesn't get through,
 //! - traffic leaving through the VPN adapter (identified by its private address),
 //! - DHCP and IPv6 link-local, so the network adapter keeps working,
 //! - the local network, when "Bypass local network" is on.
@@ -32,7 +34,8 @@ mod imp {
     use std::sync::Mutex;
 
     use windows_sys::core::GUID;
-    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::Foundation::{LocalFree, HANDLE};
+    use windows_sys::Win32::Security::Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1};
     use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::*;
 
     use super::Rules;
@@ -194,11 +197,43 @@ mod imp {
             check(FwpmGetAppIdFromFileName0(path.as_ptr(), &mut blob), "identify a core program")?;
             app_ids.push(blob);
         }
-        let result = add_layer_filters(engine, slot, rules, &app_ids);
+        let result = match ElevatedOnly::new() {
+            Ok(mut elevated) => add_layer_filters(engine, slot, rules, &app_ids, &mut elevated.blob),
+            Err(e) => Err(e),
+        };
         for mut blob in app_ids {
             FwpmFreeMemory0(&mut blob as *mut _ as *mut *mut c_void);
         }
         result
+    }
+
+    /// A security descriptor matching processes whose token has Administrators enabled (or that
+    /// run as SYSTEM). Elevated processes, like the cores Phi2ray starts, match it; a program
+    /// started normally doesn't, since its token holds Administrators for denying only. The same
+    /// kind of user condition wireguard-windows puts on its own service.
+    struct ElevatedOnly {
+        sd: *mut c_void,
+        blob: FWP_BYTE_BLOB,
+    }
+
+    impl ElevatedOnly {
+        fn new() -> Result<Self, String> {
+            // CC = FWP_ACTRL_MATCH_FILTER, the right WFP checks for user conditions.
+            let sddl = wide("O:BAD:(A;;CCRC;;;BA)(A;;CCRC;;;SY)");
+            let mut sd = null_mut();
+            let mut size = 0u32;
+            let ok = unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.as_ptr(), SDDL_REVISION_1, &mut sd, &mut size) };
+            if ok == 0 || sd.is_null() {
+                return Err("Kill switch: couldn't build the administrator-only rule.".into());
+            }
+            Ok(Self { sd, blob: FWP_BYTE_BLOB { size, data: sd as *mut u8 } })
+        }
+    }
+
+    impl Drop for ElevatedOnly {
+        fn drop(&mut self) {
+            unsafe { LocalFree(self.sd as _) };
+        }
     }
 
     unsafe fn add_layer_filters(
@@ -206,6 +241,7 @@ mod imp {
         slot: u8,
         rules: &Rules,
         app_ids: &[*mut FWP_BYTE_BLOB],
+        elevated: &mut FWP_BYTE_BLOB,
     ) -> Result<(), String> {
         let mut next = 0;
         let layers = [
@@ -219,7 +255,10 @@ mod imp {
 
             f.add(15, FWP_ACTION_PERMIT, &mut [flags_condition(FWP_CONDITION_FLAG_IS_LOOPBACK)])?;
             for &app in app_ids {
-                f.add(14, FWP_ACTION_PERMIT, &mut [blob_condition(FWPM_CONDITION_ALE_APP_ID, app)])?;
+                f.add(14, FWP_ACTION_PERMIT, &mut [
+                    blob_condition(FWPM_CONDITION_ALE_APP_ID, app),
+                    sd_condition(FWPM_CONDITION_ALE_USER_ID, elevated),
+                ])?;
             }
 
             // Traffic from the VPN adapter's own address goes into the tunnel.
@@ -228,11 +267,13 @@ mod imp {
             let tun = if v6 { v6_condition(FWPM_CONDITION_IP_LOCAL_ADDRESS, &mut tun_v6) } else { v4_condition(FWPM_CONDITION_IP_LOCAL_ADDRESS, &mut tun_v4) };
             f.add(13, FWP_ACTION_PERMIT, &mut [tun])?;
 
-            // DHCP keeps the real adapter's address alive.
-            let dhcp_port = if v6 { 546 } else { 68 };
+            // DHCP keeps the real adapter's address alive. Both ports must match (client to
+            // server), so a program can't slip out just by sending from the DHCP port.
+            let (client_port, server_port) = if v6 { (546, 547) } else { (68, 67) };
             f.add(12, FWP_ACTION_PERMIT, &mut [
                 u8_condition(FWPM_CONDITION_IP_PROTOCOL, IPPROTO_UDP),
-                u16_condition(FWPM_CONDITION_IP_LOCAL_PORT, dhcp_port),
+                u16_condition(FWPM_CONDITION_IP_LOCAL_PORT, client_port),
+                u16_condition(FWPM_CONDITION_IP_REMOTE_PORT, server_port),
             ])?;
 
             if v6 {
@@ -322,6 +363,13 @@ mod imp {
         c
     }
 
+    /// `sd` must outlive the FwpmFilterAdd0 call that uses the condition.
+    fn sd_condition(field: GUID, sd: &mut FWP_BYTE_BLOB) -> FWPM_FILTER_CONDITION0 {
+        let mut c = condition(field, FWP_MATCH_EQUAL, FWP_SECURITY_DESCRIPTOR_TYPE);
+        c.conditionValue.Anonymous.sd = sd;
+        c
+    }
+
     /// `mask` must outlive the FwpmFilterAdd0 call that uses the condition.
     fn v4_condition(field: GUID, mask: &mut FWP_V4_ADDR_AND_MASK) -> FWPM_FILTER_CONDITION0 {
         let mut c = condition(field, FWP_MATCH_EQUAL, FWP_V4_ADDR_MASK);
@@ -367,6 +415,12 @@ mod imp {
             assert_eq!((m.addr, m.mask), (0xAC10_0000, 0xFFF0_0000));
             assert_eq!(v4_mask((Ipv4Addr::new(255, 255, 255, 255), 32)).mask, u32::MAX);
             assert_eq!(v6_mask(TUN_V6).prefixLength, 126);
+        }
+
+        #[test]
+        fn administrator_only_descriptor_builds() {
+            let elevated = ElevatedOnly::new().unwrap();
+            assert!(elevated.blob.size >= 20 && !elevated.blob.data.is_null());
         }
 
         #[test]

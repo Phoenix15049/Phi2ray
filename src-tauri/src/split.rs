@@ -159,7 +159,7 @@ fn normalize_app(raw: &str) -> Result<String, String> {
 
 /// A case-insensitive regex matching the executable's full path: either exactly the given path,
 /// or any path ending in the given file name.
-fn app_pattern(entry: &str) -> Option<String> {
+pub(crate) fn app_pattern(entry: &str) -> Option<String> {
     let app = normalize_app(entry).ok()?;
     if app.contains('\\') {
         Some(format!("(?i)^{}$", regex_escape(&app)))

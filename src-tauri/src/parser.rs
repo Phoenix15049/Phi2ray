@@ -65,6 +65,20 @@ pub const MAX_PROFILES: usize = 2000;
 /// Longest link accepted. Real ones are well under 2 KB; vmess JSON with long paths a bit more.
 const MAX_LINK_LEN: usize = 16 * 1024;
 const MAX_NAME_LEN: usize = 100;
+/// Lines looked at in one paste or subscription, valid or not, so junk can't keep the parser busy.
+const MAX_LINES: usize = 20_000;
+/// Error messages kept; the rest are only counted.
+const MAX_ERRORS: usize = 20;
+
+/// The result of parsing many links at once.
+pub struct Parsed {
+    pub profiles: Vec<Profile>,
+    /// Up to `MAX_ERRORS` messages. They name the line and protocol only, never the link
+    /// itself, which holds the server's password.
+    pub errors: Vec<String>,
+    /// Every line that couldn't be used.
+    pub skipped: usize,
+}
 
 /// What the window gets for a server: everything it shows, but no id/password.
 #[derive(Serialize)]
@@ -77,8 +91,8 @@ pub struct ProfileView {
     pub port: u16,
     pub group_id: String,
     pub stream: StreamView,
-    /// Traffic to the server isn't encrypted, or its certificate isn't checked.
-    pub insecure: bool,
+    /// "unencrypted" or "unverified" (TLS that accepts any certificate); None when fine.
+    pub insecure: Option<&'static str>,
 }
 
 #[derive(Serialize)]
@@ -101,9 +115,10 @@ impl Profile {
         }
     }
 
-    /// No TLS/REALITY on a protocol that doesn't encrypt by itself, or TLS that accepts any
-    /// certificate (`allowInsecure`), which anyone on the path could intercept.
-    pub fn insecure(&self) -> bool {
+    /// "unencrypted": no TLS/REALITY on a protocol that doesn't encrypt by itself.
+    /// "unverified": TLS that accepts any certificate (`allowInsecure`), so anyone on the path
+    /// could pose as the server.
+    pub fn insecure(&self) -> Option<&'static str> {
         let s = &self.stream;
         let plain = s.security == "none"
             && match self.protocol {
@@ -111,13 +126,19 @@ impl Profile {
                 Protocol::Vmess => matches!(self.method.as_str(), "none" | "zero"),
                 Protocol::Shadowsocks => matches!(self.method.as_str(), "none" | "plain"),
             };
-        plain || (s.security == "tls" && s.allow_insecure)
+        if plain {
+            Some("unencrypted")
+        } else if s.security == "tls" && s.allow_insecure {
+            Some("unverified")
+        } else {
+            None
+        }
     }
 }
 
 /// Parses pasted text: one link per line, or a base64 subscription body. At most
-/// `MAX_PROFILES` servers are taken; the rest count as errors.
-pub fn parse_many(text: &str) -> (Vec<Profile>, Vec<String>) {
+/// `MAX_PROFILES` servers are taken; the rest count as skipped.
+pub fn parse_many(text: &str) -> Parsed {
     let text = text.trim();
     let body = if text.contains("://") {
         text.to_string()
@@ -128,18 +149,27 @@ pub fn parse_many(text: &str) -> (Vec<Profile>, Vec<String>) {
             .unwrap_or_else(|| text.to_string())
     };
 
-    let mut profiles = Vec::new();
-    let mut errors = Vec::new();
-    for line in body.lines().map(str::trim) {
-        if line.is_empty() || line.starts_with('#') {
-            continue;
+    let mut out = Parsed { profiles: Vec::new(), errors: Vec::new(), skipped: 0 };
+    let fail = |out: &mut Parsed, message: String| {
+        out.skipped += 1;
+        if out.errors.len() < MAX_ERRORS {
+            out.errors.push(message);
         }
-        if profiles.len() >= MAX_PROFILES {
-            errors.push(format!("more than {MAX_PROFILES} servers, the rest were skipped"));
+    };
+    let lines: Vec<(usize, &str)> =
+        body.lines().map(str::trim).enumerate().filter(|(_, l)| !l.is_empty() && !l.starts_with('#')).collect();
+    for (i, &(index, line)) in lines.iter().enumerate() {
+        if out.profiles.len() >= MAX_PROFILES || i >= MAX_LINES {
+            let rest = lines.len() - i;
+            out.skipped += rest;
+            if out.errors.len() < MAX_ERRORS {
+                out.errors.push(format!("{rest} more lines skipped (the limit is {MAX_PROFILES} servers)"));
+            }
             break;
         }
+        let what = format!("Line {} ({})", index + 1, scheme_of(line));
         if line.len() > MAX_LINK_LEN {
-            errors.push(format!("{}…: link too long", line.chars().take(32).collect::<String>()));
+            fail(&mut out, format!("{what}: link too long"));
             continue;
         }
         match parse_link(line) {
@@ -147,12 +177,22 @@ pub fn parse_many(text: &str) -> (Vec<Profile>, Vec<String>) {
                 if p.name.chars().count() > MAX_NAME_LEN {
                     p.name = p.name.chars().take(MAX_NAME_LEN).collect();
                 }
-                profiles.push(p)
+                out.profiles.push(p)
             }
-            Err(e) => errors.push(format!("{}…: {e}", line.chars().take(32).collect::<String>())),
+            Err(e) => fail(&mut out, format!("{what}: {}", e.chars().take(80).collect::<String>())),
         }
     }
-    (profiles, errors)
+    out
+}
+
+/// The link's protocol for error messages, or "?" when it doesn't look like one.
+fn scheme_of(line: &str) -> String {
+    match line.split_once("://") {
+        Some((scheme, _)) if !scheme.is_empty() && scheme.len() <= 12 && scheme.chars().all(|c| c.is_ascii_alphanumeric()) => {
+            scheme.to_ascii_lowercase()
+        }
+        _ => "?".into(),
+    }
 }
 
 pub fn parse_link(link: &str) -> Result<Profile, String> {
@@ -162,7 +202,7 @@ pub fn parse_link(link: &str) -> Result<Profile, String> {
         "trojan" => parse_url_style(link, Protocol::Trojan),
         "vmess" => parse_vmess(link),
         "ss" => parse_ss(link),
-        other => Err(format!("unsupported protocol: {other}")),
+        other => Err(format!("unsupported protocol: {}", other.chars().take(12).collect::<String>())),
     }
 }
 
@@ -370,24 +410,38 @@ mod tests {
     #[test]
     fn limits() {
         let many: String = (0..MAX_PROFILES + 5).map(|i| format!("trojan://pw@h{i}.com:443\n")).collect();
-        let (profiles, errors) = parse_many(&many);
-        assert_eq!(profiles.len(), MAX_PROFILES);
-        assert_eq!(errors.len(), 1);
+        let parsed = parse_many(&many);
+        assert_eq!(parsed.profiles.len(), MAX_PROFILES);
+        assert_eq!((parsed.errors.len(), parsed.skipped), (1, 5));
         let long = format!("trojan://pw@a.com:443?path={}", "a".repeat(MAX_LINK_LEN));
-        assert!(parse_many(&long).0.is_empty());
+        assert!(parse_many(&long).profiles.is_empty());
         let named = format!("trojan://pw@a.com:443#{}", "n".repeat(500));
-        assert_eq!(parse_many(&named).0[0].name.chars().count(), MAX_NAME_LEN);
+        assert_eq!(parse_many(&named).profiles[0].name.chars().count(), MAX_NAME_LEN);
+
+        // Junk can't pile up error messages; everything is still counted.
+        let junk = "vless://broken\n".repeat(50_000);
+        let parsed = parse_many(&junk);
+        assert_eq!(parsed.errors.len(), MAX_ERRORS);
+        assert_eq!(parsed.skipped, 50_000);
+    }
+
+    #[test]
+    fn errors_never_show_the_link() {
+        let parsed = parse_many("trojan://SECRETPASS@a.com\nvless://SECRETUUID@\nnope://SECRET");
+        assert_eq!(parsed.skipped, 3);
+        assert!(parsed.errors.iter().all(|e| !e.contains("SECRET")), "{:?}", parsed.errors);
+        assert!(parsed.errors[0].starts_with("Line 1 (trojan)"));
     }
 
     #[test]
     fn insecure_servers() {
         let p = |l: &str| parse_link(l).unwrap().insecure();
-        assert!(p("vless://id@a.com:443?security=none"));
-        assert!(p("trojan://pw@a.com:443?security=tls&allowInsecure=1"));
-        assert!(!p("vless://id@a.com:443?security=reality&pbk=K"));
-        assert!(!p("trojan://pw@a.com:443"));
+        assert_eq!(p("vless://id@a.com:443?security=none"), Some("unencrypted"));
+        assert_eq!(p("trojan://pw@a.com:443?security=tls&allowInsecure=1"), Some("unverified"));
+        assert_eq!(p("vless://id@a.com:443?security=reality&pbk=K"), None);
+        assert_eq!(p("trojan://pw@a.com:443"), None);
         let ss = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, "aes-256-gcm:pw");
-        assert!(!p(&format!("ss://{ss}@a.com:8388")));
+        assert_eq!(p(&format!("ss://{ss}@a.com:8388")), None);
         // The window's copy has no credentials.
         let view = serde_json::to_string(&parse_link("trojan://secretpw@a.com:443").unwrap().view()).unwrap();
         assert!(!view.contains("secretpw"));
@@ -451,7 +505,7 @@ mod tests {
     fn subscription_body() {
         let body = base64::engine::general_purpose::STANDARD
             .encode("trojan://a@b.com:443#1\nvless://id@c.com:443#2\nbogus://x\n");
-        let (ok, errs) = parse_many(&body);
+        let Parsed { profiles: ok, errors: errs, .. } = parse_many(&body);
         assert_eq!(ok.len(), 2);
         assert_eq!(errs.len(), 1);
     }

@@ -1,0 +1,34 @@
+# Checks the locked Rust and npm dependencies against the public advisory databases.
+# Runs on every push and pull request, and once a week so new advisories show up too.
+name: Dependency audit
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Audit Cargo.lock
+        run: cargo audit --file src-tauri/Cargo.lock
+
+  npm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      # Only what ships in the app; dev tools (Vite and friends) never reach the exe.
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high

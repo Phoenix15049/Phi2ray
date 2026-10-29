@@ -219,6 +219,29 @@ mod imp {
 
 pub use imp::*;
 
+/// Phi2ray runs as administrator but keeps its data in the user's own folder. If that folder
+/// or the file were a link (symlink or junction), a write could land in a place the user
+/// can't normally touch. Writing is refused in that case.
+pub fn check_write_target(path: &std::path::Path) -> Result<(), String> {
+    let is_link = |p: &std::path::Path| {
+        std::fs::symlink_metadata(p).is_ok_and(|m| {
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::MetadataExt;
+                const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+                m.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+            }
+            #[cfg(not(windows))]
+            m.file_type().is_symlink()
+        })
+    };
+    let dir = path.parent().unwrap_or(path);
+    if is_link(dir) || is_link(path) {
+        return Err(format!("Refusing to write {}: it points somewhere else (a link).", path.display()));
+    }
+    Ok(())
+}
+
 #[cfg(all(test, windows))]
 mod tests {
     #[test]

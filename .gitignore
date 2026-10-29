@@ -7,6 +7,7 @@ src-tauri/gen/
 # Core binaries are downloaded separately (see src-tauri/core/README.md)
 src-tauri/core/*
 !src-tauri/core/README.md
+!src-tauri/core/SHA256SUMS
 
 # Local tooling
 .claude/

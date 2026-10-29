@@ -69,9 +69,9 @@ pub struct Fetched {
     pub interval_hours: Option<u32>,
 }
 
-/// Downloads a subscription. `proxy_port` routes the request through the running
+/// Downloads a subscription. `proxy` routes the request through the running
 /// connection, since subscription hosts are often blocked on the open network.
-pub async fn fetch(url: &str, proxy_port: Option<u16>) -> Result<Fetched, String> {
+pub async fn fetch(url: &str, proxy: Option<&crate::probe::LocalProxy>) -> Result<Fetched, String> {
     let parsed = url::Url::parse(url.trim()).map_err(|_| "That doesn't look like a valid link.".to_string())?;
     if !matches!(parsed.scheme(), "http" | "https") {
         return Err("Subscription links must start with https:// or http://".into());
@@ -92,15 +92,14 @@ pub async fn fetch(url: &str, proxy_port: Option<u16>) -> Result<Fetched, String
                 attempt.follow()
             }
         }));
-    if let Some(port) = proxy_port {
-        let proxy = reqwest::Proxy::all(format!("http://127.0.0.1:{port}")).map_err(|e| e.to_string())?;
-        client = client.proxy(proxy);
+    if let Some(proxy) = proxy {
+        client = client.proxy(proxy.for_reqwest()?);
     } else {
         client = client.no_proxy();
     }
     let client = client.build().map_err(|e| e.to_string())?;
 
-    let response = client.get(parsed).send().await.map_err(|e| describe(&e))?;
+    let response = client.get(parsed).send().await.map_err(describe)?;
     if !response.status().is_success() {
         return Err(format!("The provider answered with HTTP {}.", response.status().as_u16()));
     }
@@ -114,7 +113,7 @@ pub async fn fetch(url: &str, proxy_port: Option<u16>) -> Result<Fetched, String
     }
     let mut response = response;
     let mut bytes = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(|e| describe(&e))? {
+    while let Some(chunk) = response.chunk().await.map_err(describe)? {
         if bytes.len() + chunk.len() > MAX_BODY {
             return Err(TOO_LARGE.into());
         }
@@ -122,7 +121,7 @@ pub async fn fetch(url: &str, proxy_port: Option<u16>) -> Result<Fetched, String
     }
     let body = String::from_utf8_lossy(&bytes);
 
-    let (profiles, errors) = parser::parse_many(&body);
+    let parser::Parsed { profiles, skipped, .. } = parser::parse_many(&body);
     if profiles.is_empty() {
         return Err(if body.trim().is_empty() {
             "The subscription is empty.".into()
@@ -132,7 +131,7 @@ pub async fn fetch(url: &str, proxy_port: Option<u16>) -> Result<Fetched, String
     }
     Ok(Fetched {
         profiles,
-        skipped: errors.len(),
+        skipped,
         title,
         upload: usage.get("upload").copied(),
         download: usage.get("download").copied(),
@@ -142,13 +141,17 @@ pub async fn fetch(url: &str, proxy_port: Option<u16>) -> Result<Fetched, String
     })
 }
 
-fn describe(e: &reqwest::Error) -> String {
+/// A message for the user. Never includes the URL: it holds the subscription's token, and
+/// these messages are shown, saved and logged (and logs get pasted into support chats).
+fn describe(e: reqwest::Error) -> String {
     if e.is_timeout() {
         "The provider didn't answer in time.".into()
     } else if e.is_connect() {
         "Couldn't reach the provider. If it's blocked, connect first and update again.".into()
+    } else if e.is_redirect() {
+        "The provider redirected to an unencrypted (http) address, or too many times.".into()
     } else {
-        format!("Download failed: {e}")
+        format!("Download failed: {}", e.without_url())
     }
 }
 

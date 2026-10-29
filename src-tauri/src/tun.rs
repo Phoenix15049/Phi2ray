@@ -3,6 +3,7 @@
 //! (XHTTP, REALITY, ...) works in VPN mode too.
 
 use std::net::IpAddr;
+use std::path::Path;
 
 use serde_json::{json, Value};
 use url::Url;
@@ -17,7 +18,16 @@ pub struct TunInput<'a> {
     /// The proxy server's resolved IP. It is routed outside the tunnel at the OS level,
     /// so xray's connection to it can never loop back into the tunnel.
     pub server_ip: IpAddr,
+    /// Phi2ray's own xray, the only program that skips the tunnel by itself.
+    pub xray_exe: &'a Path,
     pub settings: &'a Settings,
+}
+
+fn xray_rule(exe: &Path) -> Value {
+    match crate::split::app_pattern(&exe.to_string_lossy()) {
+        Some(pattern) => json!({ "process_path_regex": [pattern], "outbound": "direct" }),
+        None => json!({ "process_name": [exe.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()], "outbound": "direct" }),
+    }
 }
 
 pub fn build(t: &TunInput) -> Result<Value, String> {
@@ -38,7 +48,8 @@ pub fn build(t: &TunInput) -> Result<Value, String> {
         json!({ "protocol": "dns", "action": "hijack-dns" }),
         json!({ "port": 53, "action": "hijack-dns" }),
         // Second line of defence against loops: xray's own traffic always leaves directly.
-        json!({ "process_name": ["xray.exe", "xray"], "outbound": "direct" }),
+        // Matched by full path, so another program named xray.exe stays in the tunnel.
+        xray_rule(t.xray_exe),
         json!({ "ip_cidr": [server_cidr], "outbound": "direct" }),
     ];
     let mut dns_rules = Vec::new();
@@ -182,7 +193,14 @@ mod tests {
     use super::*;
 
     fn input(settings: &Settings) -> TunInput<'_> {
-        TunInput { socks_port: 9, socks_user: "u", socks_pass: "p", server_ip: "203.0.113.7".parse().unwrap(), settings }
+        TunInput {
+            socks_port: 9,
+            socks_user: "u",
+            socks_pass: "p",
+            server_ip: "203.0.113.7".parse().unwrap(),
+            xray_exe: Path::new(r"C:\Program Files\Phi2ray\core-0.1.0\xray.exe"),
+            settings,
+        }
     }
 
     #[test]
@@ -194,6 +212,10 @@ mod tests {
         assert_eq!(c["dns"]["strategy"], "ipv4_only");
         assert!(c["dns"]["rules"].as_array().unwrap().is_empty());
         assert_eq!(c["log"]["level"], "warn");
+        // Only Phi2ray's own xray skips the tunnel, matched by its full path.
+        let xray = &c["route"]["rules"][3]["process_path_regex"][0];
+        assert_eq!(xray, r"(?i)^C:\\Program Files\\Phi2ray\\core-0\.1\.0\\xray\.exe$");
+        assert!(c["route"]["rules"].as_array().unwrap().iter().all(|r| r["process_name"].is_null()));
     }
 
     #[test]

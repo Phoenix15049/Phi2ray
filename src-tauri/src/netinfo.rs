@@ -12,7 +12,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::connection::{now_ms, InfoTarget};
-use crate::probe::Via;
+
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 /// These answers are a few hundred bytes; anything far bigger is not what we asked for.
@@ -98,12 +98,7 @@ pub struct Report {
 }
 
 pub async fn lookup(target: InfoTarget) -> Result<Report, String> {
-    let Via::Proxy { port, user, pass } = &target.via else {
-        return Err("Connection info needs the probe proxy.".into());
-    };
-    let proxy = reqwest::Proxy::all(format!("http://127.0.0.1:{port}"))
-        .map_err(|e| e.to_string())?
-        .basic_auth(user, pass);
+    let proxy = target.via.for_reqwest()?;
     let client = reqwest::Client::builder()
         .timeout(TIMEOUT)
         .user_agent(concat!("Phi2ray/", env!("CARGO_PKG_VERSION")))
@@ -265,7 +260,7 @@ fn parse_trace(body: &str) -> Option<Trace> {
 }
 
 /// Addresses that can have a location: not private, loopback, link-local, CGNAT or similar.
-fn is_public(ip: IpAddr) -> bool {
+pub(crate) fn is_public(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
             let [a, b, ..] = v4.octets();

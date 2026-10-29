@@ -1,3 +1,8 @@
+// Release builds run as administrator. Without embedded cores they would run xray and sing-box
+// from a folder next to the exe that normal users can usually write to.
+#[cfg(all(not(debug_assertions), not(feature = "embed-cores")))]
+compile_error!("Release builds must embed the cores: use `npm run build:exe`.");
+
 mod config;
 mod connection;
 mod cores;
@@ -17,7 +22,6 @@ mod win;
 mod xray;
 
 use std::collections::{HashMap, VecDeque};
-use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -44,6 +48,9 @@ pub(crate) struct Paths {
     store: PathBuf,
     proxy_marker: PathBuf,
     core: PathBuf,
+    /// sing-box's working folder (its cache). Next to the cores in single-exe builds, where only
+    /// administrators can write, since sing-box runs elevated.
+    work: PathBuf,
 }
 
 impl Paths {
@@ -71,8 +78,6 @@ pub(crate) struct AppState {
     /// Serializes connect, disconnect and supervisor restarts.
     switching: Mutex<()>,
     verified: Mutex<HashMap<PathBuf, FileStamp>>,
-    /// Last known IP of each server address, for when DNS isn't reachable.
-    resolved: Mutex<HashMap<String, IpAddr>>,
     /// Why the bundled cores couldn't be unpacked, shown to the user.
     core_error: Option<String>,
     paths: Paths,
@@ -161,7 +166,7 @@ fn import_links(state: State<AppState>, text: String, group_id: String) -> Resul
         }
         _ => {}
     }
-    let (mut profiles, errors) = parser::parse_many(&text);
+    let parser::Parsed { mut profiles, errors, .. } = parser::parse_many(&text);
     for p in &mut profiles {
         p.group_id = group_id.clone();
     }
@@ -234,13 +239,16 @@ async fn add_subscription(app: AppHandle, url: String) -> Result<SubscriptionRes
     if state.store.lock().unwrap().groups.iter().any(|g| g.subscription.as_ref().is_some_and(|s| s.url == url)) {
         return Err("This subscription is already added.".into());
     }
-    let fetched = subscription::fetch(&url, proxy_port(&state)).await?;
+    let fetched = subscription::fetch(&url, proxy_port(&state).as_ref()).await?;
 
     let id = new_id();
     let name = fetched.title.clone().unwrap_or_else(|| {
         url::Url::parse(&url).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_else(|| "Subscription".into())
     });
-    let mut sub = Subscription { url, ..Subscription::default() };
+    // An http link can be read and its servers swapped by anyone on the way, so it isn't
+    // fetched again on its own; the user can still update it (or turn auto-update on) by hand.
+    let auto_update = url.to_ascii_lowercase().starts_with("https:");
+    let mut sub = Subscription { url, auto_update, ..Subscription::default() };
     let (count, skipped) = (fetched.profiles.len(), fetched.skipped);
     apply_fetched(&mut sub, &fetched);
 
@@ -266,7 +274,7 @@ async fn refresh_subscription(app: &AppHandle, id: &str) -> Result<SubscriptionR
         let group = store.group(id).ok_or("That group no longer exists.")?;
         group.subscription.as_ref().ok_or("This group isn't a subscription.")?.url.clone()
     };
-    let fetched = subscription::fetch(&url, proxy_port(&state)).await;
+    let fetched = subscription::fetch(&url, proxy_port(&state).as_ref()).await;
 
     let mut store = state.store.lock().unwrap();
     let old: Vec<Profile> = store.profiles.iter().filter(|p| p.group_id == id).cloned().collect();
@@ -335,9 +343,10 @@ async fn subscription_updater(app: AppHandle) {
     }
 }
 
-/// When connected, subscription downloads go through the connection.
-fn proxy_port(state: &AppState) -> Option<u16> {
-    state.link.lock().unwrap().as_ref().map(|l| l.session.http_port)
+/// When connected, subscription downloads go through the connection, always to the server
+/// (split tunnel rules don't apply to Phi2ray's own requests).
+fn proxy_port(state: &AppState) -> Option<probe::LocalProxy> {
+    connection::internal_proxy(state)
 }
 
 // ---------- Settings ----------
@@ -373,7 +382,10 @@ async fn ping_dns(app: AppHandle, servers: Vec<String>) -> Result<Vec<Option<u32
     let proxy = proxy_port(&app.state::<AppState>());
     let tasks: Vec<_> = servers
         .into_iter()
-        .map(|server| tauri::async_runtime::spawn(async move { dns::ping(&server, proxy).await.ok().flatten() }))
+        .map(|server| {
+            let proxy = proxy.clone();
+            tauri::async_runtime::spawn(async move { dns::ping(&server, proxy.as_ref()).await.ok().flatten() })
+        })
         .collect();
     let mut results = Vec::new();
     for task in tasks {
@@ -436,8 +448,16 @@ async fn check_connection(app: AppHandle) -> Result<Health, String> {
     blocking(app, |_, state| connection::check_now(state)).await?
 }
 
+/// The SOCKS link with its password, asked for only when the user copies it.
+#[tauri::command]
+fn socks_url(state: State<AppState>) -> Result<String, String> {
+    let link = state.link.lock().unwrap();
+    let s = &link.as_ref().ok_or("Not connected.")?.session;
+    Ok(format!("socks5://{}:{}@127.0.0.1:{}", s.socks_user, s.socks_pass, s.socks_port))
+}
+
 /// The only pages the window may open: a fixed list, so the WebView can't open arbitrary URLs.
-const LINKS: [(&str, &str); 2] = [("github", "https://github.com/Phoenix15049"), ("site", "http://inosila.com/")];
+const LINKS: [(&str, &str); 2] = [("github", "https://github.com/Phoenix15049"), ("site", "https://inosila.com/")];
 
 #[tauri::command]
 async fn open_link(name: String) -> Result<(), String> {
@@ -589,6 +609,7 @@ pub fn run() {
                 store: data.join("store.bin"),
                 proxy_marker: data.join("proxy-backup.json"),
                 core: find_core_dir(app.handle()),
+                work: data.join("sing-box"),
                 data,
             };
             let logs: Logs = Arc::new(Mutex::new(VecDeque::new()));
@@ -599,6 +620,9 @@ pub fn run() {
             let core_error = match cores::target_dir() {
                 None => None,
                 Some(Ok(dir)) => {
+                    if let Some(parent) = dir.parent() {
+                        paths.work = parent.join("sing-box");
+                    }
                     paths.core = dir;
                     cores::install(&paths.core).err()
                 }
@@ -627,7 +651,6 @@ pub fn run() {
                 logs,
                 switching: Mutex::new(()),
                 verified: Mutex::new(HashMap::new()),
-                resolved: Mutex::new(HashMap::new()),
                 core_error,
                 paths,
             });
@@ -665,6 +688,7 @@ pub fn run() {
             status,
             check_connection,
             connection_info,
+            socks_url,
             open_link,
             get_logs,
             clear_logs,

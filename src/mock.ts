@@ -18,7 +18,7 @@ const make = (name: string, protocol: Profile["protocol"], network: string, secu
   port: 443,
   groupId,
   stream: { network, security },
-  insecure: security === "none" && protocol !== "shadowsocks",
+  insecure: security === "none" && protocol !== "shadowsocks" ? "unencrypted" : null,
 });
 
 let groups: Group[] = [
@@ -67,8 +67,6 @@ let session: Session | null =
         mode: "tun",
         socksPort: 49731,
         httpPort: 50212,
-        socksUser: "mockuser",
-        socksPass: "mockpass",
         startedAt: Date.now() - 754_000,
         state: "connected",
         health: { ok: true, ms: 184, checkedAt: Date.now() },
@@ -162,8 +160,6 @@ const handlers: Record<string, (args: Record<string, any>) => unknown> = {
       mode: settings.mode,
       socksPort: settings.fixedPorts ? settings.socksPort : port(),
       httpPort: settings.fixedPorts ? settings.httpPort : port(),
-      socksUser: "mockuser",
-      socksPass: "mockpass",
       startedAt: Date.now(),
       state: "connected",
       health: null,
@@ -201,6 +197,10 @@ const handlers: Record<string, (args: Record<string, any>) => unknown> = {
   },
   hide_window: () => {},
   open_link: () => {},
+  socks_url: () => {
+    if (!session) throw "Not connected.";
+    return `socks5://mockuser:mockpass@127.0.0.1:${session.socksPort}`;
+  },
   check_connection: async () => {
     await wait(400);
     const health = { ok: true, ms: Math.round(120 + Math.random() * 400), checkedAt: Date.now() };

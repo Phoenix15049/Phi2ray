@@ -96,7 +96,7 @@ pub fn build(p: &Profile, inb: &Inbounds, s: &Settings, assets: &Assets) -> Valu
         log["access"] = json!("none");
     }
 
-    json!({
+    let mut config = json!({
         "log": log,
         // Byte counters for the proxy outbound, read by the app for speed and totals.
         "stats": {},
@@ -124,14 +124,6 @@ pub fn build(p: &Profile, inb: &Inbounds, s: &Settings, assets: &Assets) -> Valu
                 "sniffing": sniffing
             },
             {
-                "tag": "http",
-                "listen": "127.0.0.1",
-                "port": inb.http_port,
-                "protocol": "http",
-                "settings": {},
-                "sniffing": sniffing
-            },
-            {
                 "tag": "probe-in",
                 "listen": "127.0.0.1",
                 "port": inb.probe_port,
@@ -146,7 +138,20 @@ pub fn build(p: &Profile, inb: &Inbounds, s: &Settings, assets: &Assets) -> Valu
         ],
         // AsIs: never resolve domains locally just to match rules, so DNS does not leak.
         "routing": { "domainStrategy": "AsIs", "rules": rules }
-    })
+    });
+    // The HTTP inbound is for the proxy modes only (the system proxy and apps set up by hand).
+    // Windows can't send a password to a system proxy, so it has none; VPN mode doesn't open it.
+    if s.mode != Mode::Tun {
+        config["inbounds"].as_array_mut().unwrap().push(json!({
+            "tag": "http",
+            "listen": "127.0.0.1",
+            "port": inb.http_port,
+            "protocol": "http",
+            "settings": {},
+            "sniffing": sniffing
+        }));
+    }
+    config
 }
 
 /// Minimal config for the delay test: one local HTTP inbound, everything goes to the server.
@@ -237,11 +242,11 @@ fn stream(s: &Stream) -> Value {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::parser::parse_link;
 
-    fn inbounds() -> Inbounds {
+    pub(crate) fn inbounds() -> Inbounds {
         Inbounds {
             socks_port: 10801,
             http_port: 10802,
@@ -274,6 +279,19 @@ mod tests {
         assert_eq!(c["routing"]["rules"][1]["outboundTag"], "proxy");
         assert_eq!(c["inbounds"][0]["port"], 10803);
         assert_eq!(c["log"]["access"], "none");
+    }
+
+    #[test]
+    fn http_inbound_only_in_proxy_modes() {
+        let p = parse_link("trojan://pw@a.com:443").unwrap();
+        let assets = || Assets { geoip: false, geosite: false };
+        let has_http = |mode| {
+            let c = build(&p, &inbounds(), &Settings { mode, ..Settings::default() }, &assets());
+            c["inbounds"].as_array().unwrap().iter().any(|i| i["tag"] == "http")
+        };
+        assert!(!has_http(Mode::Tun));
+        assert!(has_http(Mode::System));
+        assert!(has_http(Mode::Manual));
     }
 
     #[test]
@@ -371,6 +389,7 @@ mod tests {
                 socks_user: "u",
                 socks_pass: "p",
                 server_ip: ip.parse().unwrap(),
+                xray_exe: std::path::Path::new(r"C:\Program Files\Phi2ray\core-0.1.0\xray.exe"),
                 settings: &settings,
             })
             .unwrap();
