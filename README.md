@@ -132,7 +132,9 @@ almost certainly have it already.
 - Your server details are handed to the cores through stdin and never written to disk as plain
   text. Saved servers and settings are encrypted with your Windows account (DPAPI). That keeps
   them safe if the file is copied somewhere else; programs running as you on this PC can still
-  read them, as with any app.
+  read them, as with any app. They live in `C:\Program Files\Phi2ray\data`, one folder per
+  Windows account, so Phi2ray (running as admin) never writes where other programs could
+  redirect it. Data from an earlier version is moved there automatically.
 - The cores are unpacked into `C:\Program Files\Phi2ray`, where only administrators can create
   or change anything. Each file is checked against the hash recorded at build time and then kept
   open with writing blocked until Phi2ray exits, so what runs is exactly what was checked. Since
@@ -140,14 +142,18 @@ almost certainly have it already.
 - Before Xray counts as started, Phi2ray checks that its local ports really belong to it, so
   another program can't grab a port first and pose as the proxy.
 - Subscriptions are capped at 8 MB and 2000 servers, and a redirect from `https` to `http` is
-  refused. Plain `http://` subscriptions don't update by themselves. Error messages never
+  refused, as is one to this PC or the local network. Plain `http://` subscriptions never update
+  by themselves, even when an https link is edited into one. Error messages never
   include a subscription link or a server's password, so logs are safe to share. The window
   itself never receives your servers' passwords or IDs.
 - While connected, subscription updates and the DNS test always go through your server, even
   when the split tunnel would send other traffic directly.
-- When DNS answers a filtered server with a fake private address (like `10.10.34.36`), Phi2ray
-  ignores it. The last good address of each server is remembered, so reconnecting still works
-  when DNS can't be reached.
+- Your server's name is looked up over encrypted DNS (DoH) before connecting, so your network's
+  DNS doesn't see it, with the normal DNS as a fallback. Fake private answers for a filtered
+  server (like `10.10.34.36`) are ignored. The last good address of each server is remembered
+  for 30 days, so reconnecting still works when DNS can't be reached.
+- Phi2ray only reports *connected* once the VPN adapter is really up, and retries once if an
+  adapter left over from an earlier run gets in the way.
 
 **What doesn't go through the tunnel**, so there are no surprises:
 

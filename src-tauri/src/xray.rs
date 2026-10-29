@@ -84,17 +84,29 @@ impl Core {
         if let Some(old) = self.tun.take() {
             kill(old);
         }
-        let mut cmd = Command::new(exe);
-        cmd.args(["run", "-c", "stdin", "--disable-color", "-D"]).arg(work_dir);
-        let mut child = self.launch("tun", cmd, &config.to_string())?;
-
-        // Creating the adapter and routes takes a moment; fail fast if sing-box gives up.
-        thread::sleep(Duration::from_millis(1500));
-        if let Ok(Some(status)) = child.try_wait() {
-            return Err(format!("VPN adapter failed to start ({status}). See logs for details."));
+        for attempt in 1..=2 {
+            let mut cmd = Command::new(exe);
+            cmd.args(["run", "-c", "stdin", "--disable-color", "-D"]).arg(work_dir);
+            let mut child = self.launch("tun", cmd, &config.to_string())?;
+            match wait_for_adapter(&mut child) {
+                Ok(()) => {
+                    self.tun = Some(child);
+                    return Ok(());
+                }
+                // An adapter left by an earlier run can make the first try fail ("already exists").
+                // Windows clears it within moments, so one more try usually works.
+                Err(Some(status)) if attempt == 1 => {
+                    push_log(&self.logs, format!("[app] VPN adapter failed to start ({status}), trying again"));
+                    thread::sleep(Duration::from_secs(2));
+                }
+                Err(Some(status)) => return Err(format!("VPN adapter failed to start ({status}). See logs for details.")),
+                Err(None) => {
+                    kill(child);
+                    return Err("The VPN adapter didn't come up in time. See logs for details.".into());
+                }
+            }
         }
-        self.tun = Some(child);
-        Ok(())
+        unreachable!()
     }
 
     /// Stops the TUN first, so traffic is never routed to a dead proxy.
@@ -188,6 +200,33 @@ pub fn port_state(pid: u32, ports: &[u16]) -> PortState {
                 PortState::Waiting
             }
         }
+    }
+}
+
+/// Waits until sing-box's adapter actually has its address, so "connected" is never shown
+/// while traffic would still take the normal route. Err(Some) if sing-box quit, Err(None) on
+/// timeout.
+fn wait_for_adapter(child: &mut Child) -> Result<(), Option<std::process::ExitStatus>> {
+    // Never sooner than before: an old adapter may still hold the address for a moment.
+    let earliest = Instant::now() + Duration::from_millis(1500);
+    let deadline = Instant::now() + Duration::from_secs(25);
+    loop {
+        if let Ok(Some(status)) = child.try_wait() {
+            return Err(Some(status));
+        }
+        let now = Instant::now();
+        if now >= earliest && std::net::UdpSocket::bind((crate::tun::ADAPTER_V4, 0)).is_ok() {
+            // Routes are set right after the address; give them a moment.
+            thread::sleep(Duration::from_millis(300));
+            return match child.try_wait() {
+                Ok(Some(status)) => Err(Some(status)),
+                _ => Ok(()),
+            };
+        }
+        if now > deadline {
+            return Err(None);
+        }
+        thread::sleep(Duration::from_millis(100));
     }
 }
 

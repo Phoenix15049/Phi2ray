@@ -605,7 +605,7 @@ export default function App() {
               >
                 {Icon.sort()}
               </button>
-              <button className="btn" onClick={testGroup} disabled={testing || !groupProfiles.length}>
+              <button className="btn" onClick={testGroup} disabled={testing || !groupProfiles.length} title={t("testHint")}>
                 {Icon.bolt()}
                 {testing ? t("testing") : t("test")}
               </button>

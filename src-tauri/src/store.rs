@@ -179,6 +179,8 @@ pub struct Store {
     /// Last good IP of each server address. Reconnecting still works when DNS can't be
     /// reached, for example while the kill switch holds the internet blocked after a crash.
     pub resolved: std::collections::HashMap<String, std::net::IpAddr>,
+    /// When each address in `resolved` was last confirmed (Unix seconds).
+    pub resolved_at: std::collections::HashMap<String, u64>,
 }
 
 impl Store {
@@ -206,6 +208,19 @@ impl Store {
         }
     }
 
+    /// Copies a store from an earlier location into `new`, once (only while `new` doesn't exist).
+    /// The old file is only read, and only a store that decrypts and parses is carried over;
+    /// nothing at the old location is renamed or deleted.
+    pub fn migrate(old: &Path, new: &Path) {
+        if new.exists() {
+            return;
+        }
+        let Ok(bytes) = fs::read(old) else { return };
+        if let Ok(store) = dpapi::unprotect(&bytes).and_then(|b| serde_json::from_slice::<Store>(&b).map_err(|e| e.to_string())) {
+            let _ = store.save(new);
+        }
+    }
+
     fn fresh() -> Self {
         Self { groups: vec![Group::default_group()], ..Self::default() }
     }
@@ -215,6 +230,10 @@ impl Store {
     fn repair_groups(&mut self) {
         if !self.groups.iter().any(|g| g.id == DEFAULT_GROUP) {
             self.groups.insert(0, Group::default_group());
+        }
+        // Stores from earlier versions may have http subscriptions set to update by themselves.
+        for sub in self.groups.iter_mut().filter_map(|g| g.subscription.as_mut()) {
+            sub.enforce_policy();
         }
         for p in &mut self.profiles {
             if !self.groups.iter().any(|g| g.id == p.group_id) {

@@ -32,6 +32,8 @@ const UNHEALTHY_INTERVAL: Duration = Duration::from_secs(5);
 /// Failed checks in a row before xray is restarted.
 const MAX_FAILURES: u32 = 3;
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
+/// A remembered server address is only used as a fallback for this long.
+const RESOLVED_MAX_AGE_SECS: u64 = 30 * 86_400;
 
 #[derive(Clone, Copy, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -587,26 +589,44 @@ fn resolve_server(state: &AppState, address: &str, port: u16) -> Result<IpAddr, 
     if let Ok(ip) = address.parse::<IpAddr>() {
         return Ok(ip);
     }
-    let answers: Vec<IpAddr> = (address, port).to_socket_addrs().map(|a| a.map(|a| a.ip()).collect()).unwrap_or_default();
     // A filtered domain can come back as a private or reserved address (Iranian DNS answers
     // 10.10.34.36, for example). That's never the real server, so it's neither used nor kept.
-    let public: Vec<IpAddr> = answers.iter().copied().filter(|ip| crate::netinfo::is_public(*ip)).collect();
+    let public = |ips: Vec<IpAddr>| -> Vec<IpAddr> { ips.into_iter().filter(|ip| crate::netinfo::is_public(*ip)).collect() };
+    // Encrypted DNS first (through the current connection when there is one), so the network's
+    // own DNS neither sees the server's name nor gets to answer it. System DNS is the fallback.
+    let doh = tauri::async_runtime::block_on(crate::dns::resolve_bootstrap(address, internal_proxy(state).as_ref()));
+    let mut answered = !doh.is_empty();
+    let mut found = public(doh);
+    if found.is_empty() {
+        let system: Vec<IpAddr> = (address, port).to_socket_addrs().map(|a| a.map(|a| a.ip()).collect()).unwrap_or_default();
+        answered |= !system.is_empty();
+        found = public(system);
+    }
+    let now = now_ms() / 1000;
     let mut store = state.store.lock().unwrap();
-    match public.iter().find(|ip| ip.is_ipv4()).or(public.first()) {
+    match found.iter().find(|ip| ip.is_ipv4()).or(found.first()) {
         Some(&ip) => {
-            if store.resolved.get(address) != Some(&ip) {
+            let stale = store.resolved_at.get(address).is_none_or(|&t| now.saturating_sub(t) > 86_400);
+            if store.resolved.get(address) != Some(&ip) || stale {
                 store.resolved.insert(address.to_string(), ip);
+                store.resolved_at.insert(address.to_string(), now);
                 let _ = store.save(&state.paths.store);
             }
             Ok(ip)
         }
-        None => store.resolved.get(address).copied().ok_or_else(|| {
-            if answers.is_empty() {
-                format!("Cannot resolve server {address}")
-            } else {
-                format!("DNS gave a fake address for {address} (it's probably filtered). Try another DNS or connect once on a network where it works.")
-            }
-        }),
+        // Last resort: the last good address, unless it's too old to trust (servers move).
+        None => store
+            .resolved
+            .get(address)
+            .copied()
+            .filter(|_| store.resolved_at.get(address).is_some_and(|&t| now.saturating_sub(t) <= RESOLVED_MAX_AGE_SECS))
+            .ok_or_else(|| {
+                if answered {
+                    format!("DNS gave a fake address for {address} (it's probably filtered). Try another DNS or connect once on a network where it works.")
+                } else {
+                    format!("Cannot resolve server {address}")
+                }
+            }),
     }
 }
 

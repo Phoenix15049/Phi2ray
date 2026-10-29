@@ -15,12 +15,15 @@ mod imp {
     use std::ptr::{null, null_mut};
     use std::sync::OnceLock;
 
-    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_INSUFFICIENT_BUFFER, HANDLE};
+    use windows_sys::Win32::Foundation::{CloseHandle, LocalFree, ERROR_INSUFFICIENT_BUFFER, HANDLE};
+    use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
     use windows_sys::Win32::NetworkManagement::IpHelper::{
         GetExtendedTcpTable, MIB_TCPTABLE_OWNER_PID, TCP_TABLE_OWNER_PID_LISTENER,
     };
     use windows_sys::Win32::Networking::WinSock::AF_INET;
-    use windows_sys::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
+    use windows_sys::Win32::Security::{
+        GetTokenInformation, TokenElevation, TokenUser, TOKEN_ELEVATION, TOKEN_QUERY, TOKEN_USER,
+    };
     use windows_sys::Win32::System::SystemInformation::GetSystemWindowsDirectoryW;
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
@@ -125,6 +128,34 @@ mod imp {
         }
     }
 
+    /// The Windows account running Phi2ray, as a SID string like "S-1-5-21-…".
+    pub fn current_user_sid() -> Option<String> {
+        unsafe {
+            let mut token: HANDLE = null_mut();
+            if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+                return None;
+            }
+            let mut len = 0u32;
+            GetTokenInformation(token, TokenUser, null_mut(), 0, &mut len);
+            // u64 elements keep the buffer aligned for the pointer inside TOKEN_USER.
+            let mut buf = vec![0u64; (len as usize).div_ceil(8).max(1)];
+            let ok = GetTokenInformation(token, TokenUser, buf.as_mut_ptr().cast(), (buf.len() * 8) as u32, &mut len);
+            CloseHandle(token);
+            if ok == 0 {
+                return None;
+            }
+            let user = &*(buf.as_ptr() as *const TOKEN_USER);
+            let mut text = null_mut();
+            if ConvertSidToStringSidW(user.User.Sid, &mut text) == 0 || text.is_null() {
+                return None;
+            }
+            let n = (0..).take_while(|&i| *text.add(i) != 0).count();
+            let sid = String::from_utf16_lossy(std::slice::from_raw_parts(text, n));
+            LocalFree(text as _);
+            sid.starts_with("S-1-").then_some(sid)
+        }
+    }
+
     /// Programs currently running, one entry per executable, without Windows' own components.
     pub fn running_apps() -> Vec<super::RunningApp> {
         use windows_sys::Win32::System::Diagnostics::ToolHelp::{
@@ -212,6 +243,10 @@ mod imp {
         None
     }
 
+    pub fn current_user_sid() -> Option<String> {
+        None
+    }
+
     pub fn running_apps() -> Vec<super::RunningApp> {
         Vec::new()
     }
@@ -251,5 +286,11 @@ mod tests {
         let owners = super::listener_pids(&[port, 1]).unwrap();
         assert_eq!(owners[0], vec![std::process::id()]);
         assert!(owners[1].is_empty());
+    }
+
+    #[test]
+    fn knows_the_current_account() {
+        let sid = super::current_user_sid().unwrap();
+        assert!(sid.starts_with("S-1-5-") && sid.chars().all(|c| c.is_ascii_digit() || c == '-' || c == 'S'));
     }
 }

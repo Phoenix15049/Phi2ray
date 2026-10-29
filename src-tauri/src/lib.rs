@@ -216,6 +216,8 @@ fn update_group(
         if let Some(auto) = auto_update {
             sub.auto_update = auto;
         }
+        // Applies to every change, including an https link edited into an http one.
+        sub.enforce_policy();
     }
     store.save(&state.paths.store)
 }
@@ -245,10 +247,8 @@ async fn add_subscription(app: AppHandle, url: String) -> Result<SubscriptionRes
     let name = fetched.title.clone().unwrap_or_else(|| {
         url::Url::parse(&url).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_else(|| "Subscription".into())
     });
-    // An http link can be read and its servers swapped by anyone on the way, so it isn't
-    // fetched again on its own; the user can still update it (or turn auto-update on) by hand.
-    let auto_update = url.to_ascii_lowercase().starts_with("https:");
-    let mut sub = Subscription { url, auto_update, ..Subscription::default() };
+    let mut sub = Subscription { url, ..Subscription::default() };
+    sub.enforce_policy();
     let (count, skipped) = (fetched.profiles.len(), fetched.skipped);
     apply_fetched(&mut sub, &fetched);
 
@@ -577,6 +577,16 @@ fn new_id() -> String {
     hex::encode(rand::thread_rng().gen::<[u8; 8]>())
 }
 
+/// Single-exe builds keep the store and proxy backup in `Program Files\Phi2ray\data\<account>`.
+/// Phi2ray runs as administrator, and writing in the user's own AppData would let any program
+/// running as that user redirect the writes with links. Under Program Files only administrators
+/// can change anything; the store stays encrypted for the account (DPAPI) as before.
+fn admin_data_dir(base: &Path) -> Option<PathBuf> {
+    let dir = base.join("data").join(win::current_user_sid()?);
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir)
+}
+
 fn find_core_dir(app: &AppHandle) -> PathBuf {
     let mut candidates = Vec::new();
     if let Ok(dir) = app.path().resource_dir() {
@@ -613,6 +623,7 @@ pub fn run() {
                 data,
             };
             let logs: Logs = Arc::new(Mutex::new(VecDeque::new()));
+            let mut legacy_marker = None;
             // Single-exe builds unpack their cores first; other builds use the core folder.
             // When unpacking fails they run no core at all: never one found next to the exe,
             // where anyone could have put it.
@@ -622,6 +633,13 @@ pub fn run() {
                 Some(Ok(dir)) => {
                     if let Some(parent) = dir.parent() {
                         paths.work = parent.join("sing-box");
+                        if let Some(secure) = admin_data_dir(parent) {
+                            legacy_marker = Some(paths.proxy_marker.clone());
+                            Store::migrate(&paths.store, &secure.join("store.bin"));
+                            paths.store = secure.join("store.bin");
+                            paths.proxy_marker = secure.join("proxy-backup.json");
+                            paths.data = secure;
+                        }
                     }
                     paths.core = dir;
                     cores::install(&paths.core).err()
@@ -631,9 +649,12 @@ pub fn run() {
             if let Some(e) = &core_error {
                 logs.lock().unwrap().push_back(format!("[app] {e}"));
             }
-            // Recover the user's proxy settings if we crashed while connected.
-            if let Err(e) = proxy::restore(&paths.proxy_marker) {
-                logs.lock().unwrap().push_back(format!("[app] {e}"));
+            // Recover the user's proxy settings if we crashed while connected (also from a backup
+            // an earlier version left in the old data folder).
+            for marker in legacy_marker.iter().chain([&paths.proxy_marker]) {
+                if let Err(e) = proxy::restore(marker) {
+                    logs.lock().unwrap().push_back(format!("[app] {e}"));
+                }
             }
             // Kill switch rules left by a crash keep blocking until the user reconnects or unblocks.
             let blocked = firewall::recover();

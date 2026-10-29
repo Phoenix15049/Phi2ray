@@ -11,6 +11,9 @@ use url::Url;
 use crate::split::{Rules as SplitRules, SplitMode};
 use crate::store::Settings;
 
+/// The VPN adapter's own IPv4 address (must match the kill switch's TUN range in firewall.rs).
+pub const ADAPTER_V4: std::net::Ipv4Addr = std::net::Ipv4Addr::new(172, 19, 0, 1);
+
 pub struct TunInput<'a> {
     pub socks_port: u16,
     pub socks_user: &'a str,
@@ -112,7 +115,7 @@ pub fn build(t: &TunInput) -> Result<Value, String> {
             "tag": "tun-in",
             "interface_name": "Phi2ray",
             // IPv6 is always captured, so it can't leak around the tunnel.
-            "address": ["172.19.0.1/30", "fdfe:dcba:9876::1/126"],
+            "address": [format!("{ADAPTER_V4}/30"), "fdfe:dcba:9876::1/126"],
             "mtu": s.tun_mtu,
             "auto_route": true,
             "strict_route": s.strict_route,

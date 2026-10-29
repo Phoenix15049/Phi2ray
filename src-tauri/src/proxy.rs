@@ -81,7 +81,7 @@ mod imp {
     pub fn restore(marker: &Path) -> Result<(), String> {
         let Ok(bytes) = fs::read(marker) else { return Ok(()) };
         let key = open()?;
-        let current = query_server().unwrap_or_else(|| key.get_value("ProxyServer").unwrap_or_default());
+        let current = query_text(INTERNET_PER_CONN_PROXY_SERVER).unwrap_or_else(|| key.get_value("ProxyServer").unwrap_or_default());
         let Ok(saved) = serde_json::from_slice::<Saved>(&bytes) else {
             // The backup is unreadable, so the earlier settings are unknown. Undo only what is
             // certainly ours (a proxy on this computer) and leave everything else alone.
@@ -96,14 +96,24 @@ mod imp {
                     .into(),
             );
         };
-        if !saved.ours.is_empty() && !current.is_empty() && current != saved.ours {
-            // Someone changed the proxy since Phi2ray set it: their choice stays.
+        if !saved.ours.is_empty() && query_text(INTERNET_PER_CONN_PROXY_SERVER).is_some_and(|s| s != saved.ours) {
+            // Someone set another proxy since Phi2ray set its own: their choice stays.
             let _ = fs::remove_file(marker);
             return Err("The Windows proxy settings were changed by another program, so they were left as they are.".into());
         }
         let err = |e: String| format!("cannot restore system proxy: {e}");
         match saved.flags {
-            Some(flags) => set(flags, &saved.server, &saved.overrides).map_err(err)?,
+            Some(saved_flags) => {
+                // If automatic detection or a setup script was switched on meanwhile (by the user
+                // or another program), that stays; only Phi2ray's own proxy is taken back.
+                let flags = match query_flags() {
+                    Some(now) if now & 0xF != PROXY_TYPE_DIRECT | PROXY_TYPE_PROXY => {
+                        (now & !PROXY_TYPE_PROXY) | (saved_flags & PROXY_TYPE_PROXY)
+                    }
+                    _ => saved_flags,
+                };
+                set(flags, &saved.server, &saved.overrides).map_err(err)?
+            }
             None => {
                 let err = |e: std::io::Error| err(e.to_string());
                 key.set_value("ProxyEnable", &saved.enable).map_err(err)?;
@@ -127,10 +137,10 @@ mod imp {
         (ok != 0).then(|| unsafe { option.Value.dwValue })
     }
 
-    /// The LAN connection's current proxy address, as WinINet itself sees it.
-    fn query_server() -> Option<String> {
+    /// A text setting of the LAN connection (proxy address or bypass list), as WinINet sees it.
+    fn query_text(which: u32) -> Option<String> {
         let mut option: INTERNET_PER_CONN_OPTIONW = unsafe { std::mem::zeroed() };
-        option.dwOption = INTERNET_PER_CONN_PROXY_SERVER;
+        option.dwOption = which;
         let mut list = option_list(std::slice::from_mut(&mut option));
         let mut size = list.dwSize;
         let ok = unsafe {

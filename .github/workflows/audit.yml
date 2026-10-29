@@ -1,5 +1,7 @@
 # Checks the locked Rust and npm dependencies against the public advisory databases.
 # Runs on every push and pull request, and once a week so new advisories show up too.
+# Actions are pinned to exact commits (the tag is noted after each), so a changed upstream tag
+# can't change what runs here.
 name: Dependency audit
 
 on:
@@ -16,19 +18,24 @@ jobs:
   rust:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
+        run: cargo install cargo-audit --version 0.22.2 --locked
       - name: Audit Cargo.lock
         run: cargo audit --file src-tauri/Cargo.lock
 
   npm:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 20
-      # Only what ships in the app; dev tools (Vite and friends) never reach the exe.
+      # What ships in the app. A high-severity advisory here fails the run.
       - name: Audit production dependencies
         run: npm audit --omit=dev --audit-level=high
+      # Build tools (Vite, esbuild and friends) never reach the exe, but they run on the machine
+      # that builds it. Reported here without failing the run.
+      - name: Audit development dependencies
+        continue-on-error: true
+        run: npm audit --audit-level=moderate

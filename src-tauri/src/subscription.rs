@@ -1,6 +1,8 @@
 //! Subscriptions: fetching a provider's server list and merging updates into a group.
 
 use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 use std::time::Duration;
 
 use base64::Engine;
@@ -52,8 +54,20 @@ impl Default for Subscription {
 impl Subscription {
     pub fn is_due(&self, now_ms: u64) -> bool {
         let interval_ms = u64::from(self.interval_hours.max(1)) * 3_600_000;
-        self.auto_update && self.updated_at.is_none_or(|t| now_ms.saturating_sub(t) >= interval_ms)
+        self.auto_update && is_https(&self.url) && self.updated_at.is_none_or(|t| now_ms.saturating_sub(t) >= interval_ms)
     }
+
+    /// Plain-http subscriptions are never updated automatically: anyone on the way could read
+    /// the link's token and swap the servers each time. The user can still update them by hand.
+    pub fn enforce_policy(&mut self) {
+        if !is_https(&self.url) {
+            self.auto_update = false;
+        }
+    }
+}
+
+pub fn is_https(url: &str) -> bool {
+    url.trim().get(..8).is_some_and(|s| s.eq_ignore_ascii_case("https://"))
 }
 
 /// What a provider returned.
@@ -86,6 +100,10 @@ pub async fn fetch(url: &str, proxy: Option<&crate::probe::LocalProxy>) -> Resul
             let downgrade = attempt.previous().iter().any(|u| u.scheme() == "https") && attempt.url().scheme() != "https";
             if downgrade {
                 attempt.error("the provider redirected to an unencrypted (http) address")
+            } else if is_local_target(attempt.url()) {
+                // Phi2ray runs as administrator: a provider mustn't be able to make it send
+                // requests to this PC or the local network.
+                attempt.error("the provider redirected to a local address")
             } else if attempt.previous().len() >= MAX_REDIRECTS {
                 attempt.error("too many redirects")
             } else {
@@ -95,7 +113,10 @@ pub async fn fetch(url: &str, proxy: Option<&crate::probe::LocalProxy>) -> Resul
     if let Some(proxy) = proxy {
         client = client.proxy(proxy.for_reqwest()?);
     } else {
-        client = client.no_proxy();
+        // Direct downloads resolve names themselves: any name other than the one the user
+        // entered may only lead to public addresses (no redirect to a name pointing at 127.0.0.1).
+        let entered = parsed.host_str().unwrap_or_default().to_ascii_lowercase();
+        client = client.no_proxy().dns_resolver(Arc::new(PublicOnly { entered }));
     }
     let client = client.build().map_err(|e| e.to_string())?;
 
@@ -149,9 +170,44 @@ fn describe(e: reqwest::Error) -> String {
     } else if e.is_connect() {
         "Couldn't reach the provider. If it's blocked, connect first and update again.".into()
     } else if e.is_redirect() {
-        "The provider redirected to an unencrypted (http) address, or too many times.".into()
+        "The provider redirected to an unsafe address (http or local), or too many times.".into()
     } else {
         format!("Download failed: {}", e.without_url())
+    }
+}
+
+/// A redirect target on this PC or the local network.
+fn is_local_target(url: &url::Url) -> bool {
+    match url.host() {
+        Some(url::Host::Ipv4(ip)) => !crate::netinfo::is_public(IpAddr::V4(ip)),
+        Some(url::Host::Ipv6(ip)) => !crate::netinfo::is_public(IpAddr::V6(ip)),
+        Some(url::Host::Domain(d)) => {
+            let d = d.trim_end_matches('.').to_ascii_lowercase();
+            d == "localhost" || d.ends_with(".localhost")
+        }
+        None => true,
+    }
+}
+
+/// Resolves names for direct subscription downloads, dropping private and loopback answers for
+/// every name except the one the user typed (which may legitimately be on their own network).
+struct PublicOnly {
+    entered: String,
+}
+
+impl reqwest::dns::Resolve for PublicOnly {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_ascii_lowercase();
+        let any_address = host == self.entered;
+        Box::pin(async move {
+            let found: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), 0)).await?.collect();
+            let allowed: Vec<SocketAddr> =
+                found.into_iter().filter(|a| any_address || crate::netinfo::is_public(a.ip())).collect();
+            if allowed.is_empty() {
+                return Err("the provider pointed to a local address".into());
+            }
+            Ok(Box::new(allowed.into_iter()) as reqwest::dns::Addrs)
+        })
     }
 }
 
@@ -230,8 +286,30 @@ mod tests {
     }
 
     #[test]
+    fn local_redirect_targets() {
+        let local = |u: &str| is_local_target(&url::Url::parse(u).unwrap());
+        assert!(local("http://127.0.0.1:8080/x"));
+        assert!(local("http://10.0.0.1/"));
+        assert!(local("http://169.254.169.254/latest"));
+        assert!(local("http://[::1]/"));
+        assert!(local("http://LOCALHOST./"));
+        assert!(!local("https://panel.example.com/sub"));
+        assert!(!local("https://8.8.8.8/"));
+    }
+
+    #[test]
+    fn http_never_updates_itself() {
+        let mut s = Subscription { url: "HTTP://panel.example/sub/t".into(), auto_update: true, ..Default::default() };
+        s.enforce_policy();
+        assert!(!s.auto_update);
+        let mut s = Subscription { url: "https://panel.example/sub/t".into(), auto_update: true, ..Default::default() };
+        s.enforce_policy();
+        assert!(s.auto_update);
+    }
+
+    #[test]
     fn due() {
-        let s = Subscription { updated_at: Some(0), interval_hours: 1, ..Default::default() };
+        let s = Subscription { url: "https://p.example/s".into(), updated_at: Some(0), interval_hours: 1, ..Default::default() };
         assert!(!s.is_due(1_000));
         assert!(s.is_due(3_600_000));
         assert!(!Subscription { auto_update: false, ..s }.is_due(u64::MAX));
