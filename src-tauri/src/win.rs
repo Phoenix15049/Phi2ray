@@ -188,7 +188,7 @@ mod imp {
             }
             CloseHandle(snapshot);
         }
-        let windows_dir = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into()).to_ascii_lowercase();
+        let windows_dir = windows_dir().map_or_else(|| "c:\\windows".into(), |d| d.to_string_lossy().to_ascii_lowercase());
         apps.retain(|a| !a.path.to_ascii_lowercase().starts_with(&windows_dir));
         apps.sort_by(|a, b| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()).then(a.path.cmp(&b.path)));
         apps.dedup_by(|a, b| a.path.eq_ignore_ascii_case(&b.path));

@@ -91,6 +91,9 @@ pub struct Settings {
     pub theme: String,
     pub always_on_top: bool,
     pub minimize_to_tray: bool,
+
+    /// The `phi2ray` console command: on PATH, and the running app takes its commands.
+    pub console: bool,
 }
 
 impl Default for Settings {
@@ -121,6 +124,7 @@ impl Default for Settings {
             theme: "system".into(),
             always_on_top: false,
             minimize_to_tray: true,
+            console: false,
         }
     }
 }

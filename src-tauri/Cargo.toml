@@ -1,6 +1,6 @@
 [package]
 name = "phi2ray"
-version = "0.1.0"
+version = "0.1.1"
 description = "A small, careful Xray client for Windows: VPN mode, kill switch, split tunnelling and subscriptions."
 authors = ["M.R. Yadollahi"]
 license = "MIT"
@@ -52,10 +52,13 @@ windows-sys = { version = "0.59", features = [
   "Win32_NetworkManagement_IpHelper",
   "Win32_NetworkManagement_WindowsFilteringPlatform",
   "Win32_Networking_WinSock",
+  "Win32_Storage_FileSystem",
   "Win32_System_Rpc",
   "Win32_System_SystemInformation",
   "Win32_System_JobObjects",
   "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_IO",
+  "Win32_System_Pipes",
   "Win32_System_Threading",
   "Win32_UI_Shell",
   "Win32_UI_WindowsAndMessaging",

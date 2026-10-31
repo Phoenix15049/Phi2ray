@@ -1,7 +1,7 @@
 {
   "name": "phi2ray",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A small, careful Xray client for Windows: VPN mode, kill switch, split tunnelling and subscriptions.",
   "author": "M.R. Yadollahi",
   "license": "MIT",
@@ -15,7 +15,8 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "tauri": "tauri",
-    "build:exe": "tauri build --no-bundle --features embed-cores"
+    "build:cli": "cargo build --release --locked --manifest-path src-tauri/cli/Cargo.toml",
+    "build:exe": "npm run build:cli && tauri build --no-bundle --features embed-cores"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",

@@ -2,6 +2,7 @@
 node_modules/
 dist/
 src-tauri/target/
+src-tauri/cli/target/
 src-tauri/gen/
 
 # Core binaries are downloaded separately (see src-tauri/core/README.md)

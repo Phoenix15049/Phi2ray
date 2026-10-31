@@ -29,7 +29,9 @@ pub const ADMIN_REQUIRED: &str = "ADMIN_REQUIRED";
 
 const HEALTHY_INTERVAL: Duration = Duration::from_secs(15);
 const UNHEALTHY_INTERVAL: Duration = Duration::from_secs(5);
-/// Failed checks in a row before xray is restarted.
+/// Failed checks in a row before xray is restarted. When restarts don't help (the server
+/// itself is down), each further one waits twice as long, up to `MAX_FAILURES << 3` checks:
+/// every restart drops all open connections, so restarting every 15 seconds only hurts.
 const MAX_FAILURES: u32 = 3;
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 /// A remembered server address is only used as a fallback for this long.
@@ -414,6 +416,8 @@ fn supervise(app: AppHandle, generation: u64) {
     let mut need_exit_info = true;
     let mut meter = TrafficMeter::default();
     let mut traffic_warned = false;
+    // Restarts in a row that didn't bring traffic back.
+    let mut fruitless_restarts = 0u32;
 
     loop {
         thread::sleep(Duration::from_secs(1));
@@ -501,7 +505,11 @@ fn supervise(app: AppHandle, generation: u64) {
         }
 
         if healthy {
+            if fruitless_restarts > 0 {
+                log(&state, "[app] Traffic is getting through again");
+            }
             failures = 0;
+            fruitless_restarts = 0;
             next_check = Instant::now() + HEALTHY_INTERVAL;
             continue;
         }
@@ -510,19 +518,24 @@ fn supervise(app: AppHandle, generation: u64) {
         if failures == 1 {
             log(&state, "[app] Health check failed");
         }
-        if failures >= MAX_FAILURES && auto_reconnect(&state) {
+        if failures >= MAX_FAILURES << fruitless_restarts.min(3) && auto_reconnect(&state) {
             // The server or network hiccuped: a fresh xray drops stale connections.
             let Ok(_guard) = state.switching.try_lock() else { continue };
             if !current() {
                 return;
             }
             set_state(&state, LinkState::Reconnecting);
-            log(&state, format!("[app] No traffic for {failures} checks, restarting Xray"));
+            if fruitless_restarts == 0 {
+                log(&state, format!("[app] No traffic for {failures} checks, restarting Xray"));
+            } else {
+                log(&state, format!("[app] Still no traffic: the server may be down or blocked. Restarting Xray again ({})", fruitless_restarts + 1));
+            }
             match restart(&state, true, false) {
                 Ok(()) => need_exit_info = true,
                 Err(e) => log(&state, format!("[app] Restart failed: {e}")),
             }
             failures = 0;
+            fruitless_restarts += 1;
         }
     }
 }

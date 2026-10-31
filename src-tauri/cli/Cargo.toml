@@ -1,0 +1,43 @@
+[package]
+name = "phi2ray-cli"
+version = "0.1.1"
+description = "The phi2ray console command: controls the running Phi2ray app."
+authors = ["M.R. Yadollahi"]
+license = "MIT"
+edition = "2021"
+publish = false
+
+# Kept out of the app's workspace on purpose: the app embeds this program, so it's built first,
+# on its own (`npm run build:cli`).
+[workspace]
+
+[[bin]]
+name = "phi2ray"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Com",
+  "Win32_System_IO",
+  "Win32_System_Pipes",
+  "Win32_System_Registry",
+  "Win32_System_Threading",
+  "Win32_UI_Shell",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

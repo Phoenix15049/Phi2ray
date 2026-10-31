@@ -27,4 +27,5 @@ export const DEFAULT_SETTINGS: Settings = {
   theme: "system",
   alwaysOnTop: false,
   minimizeToTray: true,
+  console: false,
 };

@@ -5,10 +5,12 @@ compile_error!("Release builds must embed the cores: use `npm run build:exe`.");
 
 mod config;
 mod connection;
+mod console;
 mod cores;
 mod delay;
 mod dns;
 mod firewall;
+mod ipc;
 mod netinfo;
 mod parser;
 mod probe;
@@ -21,7 +23,7 @@ mod tun;
 mod win;
 mod xray;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -108,21 +110,21 @@ struct Status {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ImportResult {
+pub(crate) struct ImportResult {
     added: usize,
     errors: Vec<String>,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct SubscriptionResult {
+pub(crate) struct SubscriptionResult {
     group_id: String,
     count: usize,
     skipped: usize,
 }
 
 #[derive(Clone, Serialize)]
-struct DelayResult {
+pub(crate) struct DelayResult {
     id: String,
     ms: Option<u32>,
 }
@@ -158,17 +160,21 @@ fn get_state(state: State<AppState>) -> Snapshot {
 
 #[tauri::command]
 fn import_links(state: State<AppState>, text: String, group_id: String) -> Result<ImportResult, String> {
+    add_links(&state, &text, &group_id)
+}
+
+pub(crate) fn add_links(state: &AppState, text: &str, group_id: &str) -> Result<ImportResult, String> {
     let mut store = state.store.lock().unwrap();
-    match store.group(&group_id) {
+    match store.group(group_id) {
         None => return Err("That group no longer exists.".into()),
         Some(g) if g.subscription.is_some() => {
             return Err("Servers can't be added to a subscription; they'd be replaced on the next update.".into())
         }
         _ => {}
     }
-    let parser::Parsed { mut profiles, errors, .. } = parser::parse_many(&text);
+    let parser::Parsed { mut profiles, errors, .. } = parser::parse_many(text);
     for p in &mut profiles {
-        p.group_id = group_id.clone();
+        p.group_id = group_id.to_string();
     }
     let added = profiles.len();
     store.profiles.extend(profiles);
@@ -236,6 +242,10 @@ fn delete_group(state: State<AppState>, id: String) -> Result<(), String> {
 
 #[tauri::command]
 async fn add_subscription(app: AppHandle, url: String) -> Result<SubscriptionResult, String> {
+    add_subscription_url(&app, &url).await
+}
+
+pub(crate) async fn add_subscription_url(app: &AppHandle, url: &str) -> Result<SubscriptionResult, String> {
     let url = url.trim().to_string();
     let state = app.state::<AppState>();
     if state.store.lock().unwrap().groups.iter().any(|g| g.subscription.as_ref().is_some_and(|s| s.url == url)) {
@@ -352,22 +362,31 @@ fn proxy_port(state: &AppState) -> Option<probe::LocalProxy> {
 // ---------- Settings ----------
 
 #[tauri::command]
-async fn update_settings(app: AppHandle, mut settings: Settings) -> Result<Settings, String> {
+async fn update_settings(app: AppHandle, settings: Settings) -> Result<Settings, String> {
+    blocking(app, move |app, state| save_settings(app, state, settings)).await?
+}
+
+/// Checks, applies and saves new settings. Blocking: changing the kill switch or console
+/// control can take a moment. Returns the cleaned-up version (e.g. canonical split tunnel
+/// entries).
+pub(crate) fn save_settings(app: &AppHandle, state: &AppState, mut settings: Settings) -> Result<Settings, String> {
     settings.validate()?;
     settings.split.normalize()?;
-    blocking(app, move |app, state| {
-        let kill_switch_changed = state.store.lock().unwrap().settings.kill_switch != settings.kill_switch;
-        if kill_switch_changed {
-            connection::apply_kill_switch(state, &settings)?;
-        }
-        apply_window_settings(app, &settings);
-        let mut store = state.store.lock().unwrap();
-        store.settings = settings.clone();
-        store.save(&state.paths.store)?;
-        // The cleaned-up version (e.g. canonical split tunnel entries) goes back to the UI.
-        Ok(settings)
-    })
-    .await?
+    let (kill_switch_changed, console_changed) = {
+        let store = state.store.lock().unwrap();
+        (store.settings.kill_switch != settings.kill_switch, store.settings.console != settings.console)
+    };
+    if kill_switch_changed {
+        connection::apply_kill_switch(state, &settings)?;
+    }
+    if console_changed {
+        console::apply(app, settings.console)?;
+    }
+    apply_window_settings(app, &settings);
+    let mut store = state.store.lock().unwrap();
+    store.settings = settings.clone();
+    store.save(&state.paths.store)?;
+    Ok(settings)
 }
 
 fn apply_window_settings(app: &AppHandle, settings: &Settings) {
@@ -474,7 +493,7 @@ async fn connection_info(app: AppHandle) -> Result<netinfo::Report, String> {
 
 #[tauri::command]
 fn get_logs(state: State<AppState>) -> Vec<String> {
-    state.logs.lock().unwrap().iter().cloned().collect()
+    state.logs.lock().unwrap().all()
 }
 
 #[tauri::command]
@@ -485,6 +504,16 @@ fn clear_logs(state: State<AppState>) {
 /// Tests the given profiles (all if `ids` is empty) and emits a `delay` event per result.
 #[tauri::command]
 async fn test_delays(app: AppHandle, ids: Vec<String>) -> Result<(), String> {
+    run_delay_tests(&app, ids, |_| {}).await
+}
+
+/// Tests the given profiles (all if `ids` is empty). Each result is emitted as a `delay` event
+/// for the window and handed to `on_result`.
+pub(crate) async fn run_delay_tests(
+    app: &AppHandle,
+    ids: Vec<String>,
+    on_result: impl Fn(&DelayResult) + Send + Sync + 'static,
+) -> Result<(), String> {
     let (profiles, target, exe, assets) = blocking(app.clone(), move |_, state| -> Result<_, String> {
         let exe = state.paths.xray();
         if !exe.exists() {
@@ -501,14 +530,18 @@ async fn test_delays(app: AppHandle, ids: Vec<String>) -> Result<(), String> {
 
     let target = Arc::new(target);
     let limit = Arc::new(Semaphore::new(DELAY_TEST_PARALLEL));
+    let on_result = Arc::new(on_result);
     let tasks: Vec<_> = profiles
         .into_iter()
         .map(|p| {
             let (app, exe, assets, target, limit) = (app.clone(), exe.clone(), assets.clone(), target.clone(), limit.clone());
+            let on_result = on_result.clone();
             tauri::async_runtime::spawn(async move {
                 let _permit = limit.acquire_owned().await;
                 let ms = delay::test(&exe, &assets, &p, &target).await;
-                let _ = app.emit("delay", DelayResult { id: p.id, ms });
+                let result = DelayResult { id: p.id, ms };
+                on_result(&result);
+                let _ = app.emit("delay", result);
             })
         })
         .collect();
@@ -622,7 +655,7 @@ pub fn run() {
                 work: data.join("sing-box"),
                 data,
             };
-            let logs: Logs = Arc::new(Mutex::new(VecDeque::new()));
+            let logs: Logs = Arc::new(Mutex::new(xray::LogBuf::default()));
             let mut legacy_marker = None;
             // Single-exe builds unpack their cores first; other builds use the core folder.
             // When unpacking fails they run no core at all: never one found next to the exe,
@@ -647,19 +680,19 @@ pub fn run() {
                 Some(Err(e)) => Some(e),
             };
             if let Some(e) = &core_error {
-                logs.lock().unwrap().push_back(format!("[app] {e}"));
+                logs.lock().unwrap().push(format!("[app] {e}"));
             }
             // Recover the user's proxy settings if we crashed while connected (also from a backup
             // an earlier version left in the old data folder).
             for marker in legacy_marker.iter().chain([&paths.proxy_marker]) {
                 if let Err(e) = proxy::restore(marker) {
-                    logs.lock().unwrap().push_back(format!("[app] {e}"));
+                    logs.lock().unwrap().push(format!("[app] {e}"));
                 }
             }
             // Kill switch rules left by a crash keep blocking until the user reconnects or unblocks.
             let blocked = firewall::recover();
             if blocked {
-                logs.lock().unwrap().push_back(
+                logs.lock().unwrap().push(
                     "[app] Phi2ray closed unexpectedly while the kill switch was on. The internet stays blocked until you reconnect or unblock.".into(),
                 );
             }
@@ -679,6 +712,11 @@ pub fn run() {
             let settings = app.state::<AppState>().store.lock().unwrap().settings.clone();
             apply_window_settings(app.handle(), &settings);
             tray::create(app.handle())?;
+            console::startup(app.handle());
+            // `phi2ray start` launches the app into the tray; otherwise the window opens.
+            if !std::env::args().any(|a| a == "--hidden") {
+                tray::show_window(app.handle());
+            }
             Ok(())
         })
         .on_window_event(|window, event| match event {

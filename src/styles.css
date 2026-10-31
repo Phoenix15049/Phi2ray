@@ -1858,3 +1858,13 @@ select:focus-visible {
   color: var(--text-3);
   font-size: 12px;
 }
+
+/* A command to type, inside a hint. */
+.hint code {
+  padding: 1px 6px;
+  border-radius: 6px;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 0.95em;
+  color: var(--accent);
+  background: var(--accent-soft);
+}

@@ -73,6 +73,8 @@ export type Settings = {
   theme: "system" | "light" | "dark";
   alwaysOnTop: boolean;
   minimizeToTray: boolean;
+  /** The `phi2ray` console command. */
+  console: boolean;
 };
 
 export type Health = { ok: boolean; ms: number | null; checkedAt: number };

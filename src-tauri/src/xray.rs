@@ -32,7 +32,43 @@ pub const PORT_TAKEN: &str = "Local port";
 /// Longer lines are cut, so one runaway message can't take much memory.
 const MAX_LINE_LEN: usize = 2000;
 
-pub type Logs = Arc<Mutex<VecDeque<String>>>;
+pub type Logs = Arc<Mutex<LogBuf>>;
+
+/// The newest log lines, numbered: `total` counts every line ever added, so a reader can ask
+/// for only the lines after the last one it saw (the console tool's `logs --follow`).
+#[derive(Default)]
+pub struct LogBuf {
+    lines: VecDeque<String>,
+    total: u64,
+}
+
+impl LogBuf {
+    pub fn push(&mut self, line: String) {
+        while self.lines.len() >= MAX_LOG_LINES {
+            self.lines.pop_front();
+        }
+        self.lines.push_back(line);
+        self.total += 1;
+    }
+
+    pub fn all(&self) -> Vec<String> {
+        self.lines.iter().cloned().collect()
+    }
+
+    /// Lines numbered `since` and later (or the last `last` of them), and the number to ask
+    /// for next time.
+    pub fn since(&self, since: Option<u64>, last: usize) -> (Vec<String>, u64) {
+        let first = self.total - self.lines.len() as u64;
+        let skip = since.map_or(0, |n| n.saturating_sub(first).min(self.lines.len() as u64) as usize);
+        let lines: Vec<String> = self.lines.iter().skip(skip).cloned().collect();
+        let keep = lines.len().saturating_sub(last);
+        (lines[keep..].to_vec(), self.total)
+    }
+
+    pub fn clear(&mut self) {
+        self.lines.clear();
+    }
+}
 
 pub struct Core {
     xray: Option<Child>,
@@ -237,11 +273,7 @@ pub fn push_log(logs: &Logs, mut line: String) {
         line.truncate(cut);
         line.push('…');
     }
-    let mut logs = logs.lock().unwrap();
-    while logs.len() >= MAX_LOG_LINES {
-        logs.pop_front();
-    }
-    logs.push_back(line);
+    logs.lock().unwrap().push(line);
 }
 
 fn alive(child: &mut Option<Child>) -> Option<bool> {
@@ -283,4 +315,26 @@ pub fn version(exe: &Path) -> Option<String> {
     let text = String::from_utf8_lossy(&out.stdout);
     let first = text.lines().next()?;
     first.split_whitespace().find(|w| w.starts_with(|c: char| c.is_ascii_digit())).map(String::from)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LogBuf;
+
+    #[test]
+    fn log_readers_get_only_new_lines() {
+        let mut logs = LogBuf::default();
+        for i in 0..5 {
+            logs.push(format!("line {i}"));
+        }
+        let (lines, next) = logs.since(None, 2);
+        assert_eq!((lines, next), (vec!["line 3".to_string(), "line 4".to_string()], 5));
+        logs.push("line 5".into());
+        assert_eq!(logs.since(Some(next), usize::MAX), (vec!["line 5".to_string()], 6));
+        // Cleared lines are gone, but the numbering goes on.
+        logs.clear();
+        assert_eq!(logs.since(Some(6), usize::MAX), (vec![], 6));
+        logs.push("line 6".into());
+        assert_eq!(logs.since(Some(6), usize::MAX).0, vec!["line 6".to_string()]);
+    }
 }

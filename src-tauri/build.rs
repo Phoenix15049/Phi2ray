@@ -24,7 +24,24 @@ fn main() {
 
     if std::env::var_os("CARGO_FEATURE_EMBED_CORES").is_some() {
         embed_cores();
+        embed_cli();
     }
+}
+
+/// The `phi2ray` console tool (`src-tauri/cli`), built before the app by `npm run build:exe`.
+/// The app installs it when console control is turned on.
+fn embed_cli() {
+    use sha2::{Digest, Sha256};
+
+    let exe = Path::new("cli/target/release/phi2ray.exe");
+    println!("cargo:rerun-if-changed={}", exe.display());
+    let data = std::fs::read(exe).unwrap_or_else(|_| {
+        panic!("embed-cores: {} is missing. Build it first with `npm run build:cli` (`npm run build:exe` does both).", exe.display())
+    });
+    let packed = Path::new(&std::env::var("OUT_DIR").unwrap()).join("phi2ray-cli.exe.zst");
+    std::fs::write(&packed, zstd::encode_all(&data[..], 19).expect("compressing the console tool failed")).unwrap();
+    println!("cargo:rustc-env=PHI2RAY_CLI_ZST={}", packed.display());
+    println!("cargo:rustc-env=PHI2RAY_CLI_SHA256={}", hex::encode(Sha256::digest(&data)));
 }
 
 /// Compresses everything in `core/` that the app runs or reads (exe, dll, dat) into OUT_DIR

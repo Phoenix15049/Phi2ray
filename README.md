@@ -97,6 +97,28 @@ out of your way. It ships as one `.exe`, about 45 MB, with both cores inside.
   reconnecting, red when the kill switch is holding the internet blocked, none when off.
 - Dark and light themes, and a full Persian interface.
 
+**From the terminal**
+
+Turn on *Settings → Console*, open a new terminal, and Phi2ray takes commands:
+
+```bash
+phi2ray                    # where things stand: server, exit IP, speed, kill switch
+phi2ray connect Germany    # by number, name (or part of it) or id; no name = the selected one
+phi2ray disconnect
+phi2ray servers            # numbered list; phi2ray groups shows groups and subscriptions
+phi2ray test               # delays of every server, printed as they come in
+phi2ray mode proxy         # vpn, proxy or manual; reconnects if you're connected
+phi2ray killswitch off
+phi2ray add "vless://..."  # or a subscription URL, or - to read links from a pipe
+phi2ray update             # refresh subscriptions
+phi2ray logs -f            # follow the log
+phi2ray help
+```
+
+Every command takes `--json` for scripts, and exits with 0 on success, 1 on an error, 2 for a
+typo in the command and 3 when Phi2ray isn't running. `phi2ray start` (and `connect`, if needed)
+opens Phi2ray in the tray first. The command itself never needs administrator rights.
+
 ## Getting started
 
 1. Grab `Phi2ray-<version>-windows-x64.exe` from the [latest release](https://github.com/Phoenix15049/Phi2ray/releases/latest).
@@ -154,6 +176,17 @@ almost certainly have it already.
   for 30 days, so reconnecting still works when DNS can't be reached.
 - Phi2ray only reports *connected* once the VPN adapter is really up, and retries once if an
   adapter left over from an earlier run gets in the way.
+- If the server stops answering, Xray is restarted after 15 seconds, then less and less often
+  (up to every two minutes), since every restart drops all open connections.
+- **Console control** is off until you turn it on. The `phi2ray` command lives in
+  `C:\Program Files\Phi2ray\bin` (only that folder is added to your own PATH) and talks to the
+  app over a local pipe that only your Windows account can open, and never from another
+  computer. Your programs can talk over it but can't take its place: the command checks that the
+  other end belongs to Administrators, which only Phi2ray itself can do, before it sends
+  anything. `phi2ray start` only launches the exact Phi2ray file that last ran. Commands do what
+  the window does, and no answer includes a server password or the SOCKS credentials. While it's
+  on, programs running as you can control the connection and read the log, so leave it off if
+  you don't use it.
 
 **What doesn't go through the tunnel**, so there are no surprises:
 
@@ -192,7 +225,8 @@ The cores aren't in the repo, so download them and drop them into `src-tauri/cor
 `src-tauri/core/SHA256SUMS` pins the exact files the release embeds, and the build stops if
 anything in that folder doesn't match. If you update a core, check it against the digests on its
 release page and update `SHA256SUMS` too. Releases are always built with `npm run build:exe`;
-a release build without the embedded cores is refused on purpose.
+a release build without the embedded cores is refused on purpose. It builds the `phi2ray`
+console command (`src-tauri/cli`) first and packs it into the exe as well.
 
 ```bash
 # Development (open the terminal as administrator if you want to try VPN mode)

@@ -81,7 +81,24 @@ mod imp {
             };
             locked.push((path, handle));
         }
+        drop(locked);
+        remove_old_versions(dir);
         Ok(())
+    }
+
+    /// Cores unpacked by earlier versions of Phi2ray are never used again: they are removed
+    /// (best effort, so a folder still in use by another copy simply stays).
+    fn remove_old_versions(current: &Path) {
+        let (Some(parent), Some(name)) = (current.parent(), current.file_name()) else { return };
+        let Ok(entries) = fs::read_dir(parent) else { return };
+        for entry in entries.flatten() {
+            let old = entry.file_name();
+            let is_core = old.to_string_lossy().starts_with("core-");
+            // Real folders only: a link is never followed into, just left alone.
+            if is_core && old != name && entry.file_type().is_ok_and(|t| t.is_dir()) {
+                let _ = fs::remove_dir_all(entry.path());
+            }
+        }
     }
 
     pub fn trusted(exe: &Path) -> bool {

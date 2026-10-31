@@ -218,6 +218,19 @@ export function SettingsSheet(p: Props) {
         </Group>
       </Section>
 
+      <Section title={t("consoleSection")}>
+        <Group>
+          <Row title={t("consoleCommand")} hint={t("consoleCommandHint")}>
+            <Switch checked={s.console} onChange={(v) => p.onChange({ console: v })} label={t("consoleCommand")} />
+          </Row>
+        </Group>
+        {s.console && (
+          <p className="hint selectable">
+            {t("consoleOnHint")} <code className="ltr">phi2ray help</code>
+          </p>
+        )}
+      </Section>
+
       <Section title={t("about")}>
         <dl className="facts">
           <dt>Phi2ray</dt>
