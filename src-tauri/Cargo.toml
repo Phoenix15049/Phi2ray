@@ -22,7 +22,8 @@ embed-cores = ["dep:zstd"]
 tauri-build = { version = "2", features = [] }
 sha2 = "0.10"
 hex = "0.4"
-zstd = "0.13"
+# Only plain frames are packed and unpacked: no legacy format, no dictionaries.
+zstd = { version = "0.14.3", default-features = false }
 
 [dependencies]
 tauri = { version = "2", features = ["tray-icon"] }
@@ -38,7 +39,7 @@ hex = "0.4"
 tokio = { version = "1", features = ["net", "time", "process", "sync", "io-util"] }
 # Subscriptions only. native-tls uses Windows' own TLS (SChannel), so no extra crypto is bundled.
 reqwest = { version = "0.12", default-features = false, features = ["native-tls", "gzip"] }
-zstd = { version = "0.13", optional = true }
+zstd = { version = "0.14.3", default-features = false, optional = true }
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"
