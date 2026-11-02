@@ -109,7 +109,7 @@ phi2ray servers            # numbered list; phi2ray groups shows groups and subs
 phi2ray test               # delays of every server, printed as they come in
 phi2ray mode proxy         # vpn, proxy or manual; reconnects if you're connected
 phi2ray killswitch off
-phi2ray add "vless://..."  # or a subscription URL, or - to read links from a pipe
+phi2ray add                # the links or subscription URL you copied (clipboard)
 phi2ray update             # refresh subscriptions
 phi2ray logs -f            # follow the log
 phi2ray help
@@ -118,6 +118,10 @@ phi2ray help
 Every command takes `--json` for scripts, and exits with 0 on success, 1 on an error, 2 for a
 typo in the command and 3 when Phi2ray isn't running. `phi2ray start` (and `connect`, if needed)
 opens Phi2ray in the tray first. The command itself never needs administrator rights.
+
+Links and subscription URLs contain your passwords and tokens, so don't type them after
+`phi2ray add`: shells keep a history file (PowerShell in plain text). Copy them and run
+`phi2ray add` on its own, or pipe them in with `phi2ray add -`.
 
 ## Getting started
 
@@ -132,6 +136,15 @@ want to change something.
 > **About the SmartScreen warning:** the exe isn't code-signed yet, so Windows may call it an
 > "unrecognized app". Click *More info → Run anyway*. If you want to be sure the file is the one
 > I published, compare its SHA-256 with the one in the release notes.
+>
+> Releases are built by GitHub Actions straight from the tagged commit
+> ([workflow](.github/workflows/release.yml)), never on my own PC, and only if the dependency
+> audits pass and every core matches its pinned hash. The release notes name the commit. Once the
+> repository is public, each exe also comes with a signed build attestation you can check:
+>
+> ```bash
+> gh attestation verify Phi2ray-<version>-windows-x64.exe -R Phoenix15049/Phi2ray
+> ```
 
 You'll also need the Microsoft Edge WebView2 runtime. It comes with Windows 10 and 11, so you
 almost certainly have it already.
@@ -190,9 +203,10 @@ almost certainly have it already.
 
 **What doesn't go through the tunnel**, so there are no surprises:
 
-- Your local network (router, printers, other PCs), while *Bypass local network* is on.
+- Your local network (router, printers, other PCs), while *Local network outside the VPN* is on.
 - Apps and sites you exclude with split tunnel, or with *Only via VPN*, everything you didn't list.
-- Iranian sites, if you turn that option on.
+- Iranian sites, if you turn that option on. Their names are also looked up with your network's
+  DNS, not through the tunnel.
 - Anything addressed to your server's own IP. That's how the tunnel itself gets out; it only
   matters if your server sits behind a CDN address that other sites share.
 - *Test* on the server list connects straight to each server, as every client does. It's the
@@ -226,7 +240,9 @@ The cores aren't in the repo, so download them and drop them into `src-tauri/cor
 anything in that folder doesn't match. If you update a core, check it against the digests on its
 release page and update `SHA256SUMS` too. Releases are always built with `npm run build:exe`;
 a release build without the embedded cores is refused on purpose. It builds the `phi2ray`
-console command (`src-tauri/cli`) first and packs it into the exe as well.
+console command (`src-tauri/cli`) first and packs it into the exe as well. Published releases
+come from the [release workflow](.github/workflows/release.yml): push a tag like `v0.1.2` and it
+downloads the pinned cores, runs the audits, builds, and drafts the release.
 
 ```bash
 # Development (open the terminal as administrator if you want to try VPN mode)

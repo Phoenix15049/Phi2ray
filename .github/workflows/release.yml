@@ -1,0 +1,132 @@
+# Builds the single-file exe on GitHub from a version tag, so every release can be traced back to
+# its exact commit and build, and publishes it as a draft release with its SHA-256.
+#
+# - Push a tag like `v0.1.2` (matching the version in tauri.conf.json) to build and draft a release.
+# - Or run it by hand (Actions → Release → Run workflow) to build without releasing; the exe is
+#   kept as a workflow artifact.
+#
+# Nothing ships if a dependency audit fails or a downloaded core doesn't match
+# src-tauri/core/SHA256SUMS. Actions are pinned to exact commits (tag noted after each).
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Must match the files pinned in src-tauri/core/SHA256SUMS.
+  XRAY_VERSION: "26.10.21"
+  SING_BOX_VERSION: "1.14.4"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: write # draft release
+      id-token: write # build attestation
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 20
+
+      - name: Check the tag matches the app version
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          $version = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          if ("v$version" -ne $env:TAG) { throw "Tag $env:TAG doesn't match the app version $version." }
+
+      - name: Audit dependencies
+        shell: bash
+        run: |
+          cargo install cargo-audit --version 0.22.2 --locked
+          cargo audit --file src-tauri/Cargo.lock
+          cargo audit --file src-tauri/cli/Cargo.lock
+          npm audit --omit=dev --audit-level=high
+
+      - name: Download and check the cores
+        shell: pwsh
+        run: |
+          $tmp = Join-Path $env:RUNNER_TEMP cores
+          New-Item -ItemType Directory $tmp | Out-Null
+          Invoke-WebRequest "https://github.com/XTLS/Xray-core/releases/download/v$env:XRAY_VERSION/Xray-windows-64.zip" -OutFile "$tmp/xray.zip"
+          Invoke-WebRequest "https://github.com/SagerNet/sing-box/releases/download/v$env:SING_BOX_VERSION/sing-box-$env:SING_BOX_VERSION-windows-amd64.zip" -OutFile "$tmp/sing-box.zip"
+          Expand-Archive "$tmp/xray.zip" "$tmp/xray"
+          Expand-Archive "$tmp/sing-box.zip" "$tmp/sing-box"
+          Get-ChildItem "$tmp/xray" -Recurse -Include xray.exe, geoip.dat, geosite.dat | Copy-Item -Destination src-tauri/core/
+          Get-ChildItem "$tmp/sing-box" -Recurse -Include sing-box.exe, libcronet.dll | Copy-Item -Destination src-tauri/core/
+          # The build itself refuses any file that doesn't match; this just says which one.
+          foreach ($line in Get-Content src-tauri/core/SHA256SUMS) {
+            $hash, $name = $line -split '\s+', 2
+            $name = $name.TrimStart('*')
+            $actual = (Get-FileHash "src-tauri/core/$name" -Algorithm SHA256).Hash.ToLower()
+            if ($actual -ne $hash) { throw "$name has SHA-256 $actual, but SHA256SUMS pins $hash." }
+            "$name OK"
+          }
+
+      - name: Build
+        run: |
+          npm ci
+          npm run build:exe
+
+      - name: Name and hash the exe
+        shell: pwsh
+        run: |
+          $version = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          $name = "Phi2ray-$version-windows-x64.exe"
+          New-Item -ItemType Directory release | Out-Null
+          Copy-Item src-tauri/target/release/phi2ray.exe "release/$name"
+          $hash = (Get-FileHash "release/$name" -Algorithm SHA256).Hash.ToLower()
+          "$hash *$name" | Out-File release/SHA256SUMS.txt -Encoding ascii
+          "EXE_NAME=$name" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "EXE_SHA256=$hash" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+      # Signed proof that this exe came from this repository, commit and workflow. GitHub offers
+      # it for public repositories (private ones need GitHub Enterprise).
+      - name: Attest the build
+        if: github.event.repository.visibility == 'public'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: release/*.exe
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: phi2ray-windows-x64
+          path: release/
+
+      - name: Draft the release
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          COMMIT: ${{ github.sha }}
+          ATTESTED: ${{ github.event.repository.visibility == 'public' }}
+        run: |
+          $fence = '```'
+          $tick = '`'
+          $notes = @(
+            "Built by GitHub Actions from commit $env:COMMIT.",
+            "",
+            "**$env:EXE_NAME**",
+            "SHA-256: $tick$env:EXE_SHA256$tick",
+            ""
+          )
+          if ($env:ATTESTED -eq 'true') {
+            $notes += @("Check it was built here, from this commit:", "", "${fence}bash", "gh attestation verify $env:EXE_NAME -R $env:GITHUB_REPOSITORY", $fence, "")
+          }
+          $notes += @("Cores inside: Xray $env:XRAY_VERSION, sing-box $env:SING_BOX_VERSION", "", $fence)
+          $notes += Get-Content src-tauri/core/SHA256SUMS
+          $notes += $fence
+          $notes | Out-File notes.md -Encoding utf8
+          gh release create $env:TAG release/* --draft --verify-tag --title "Phi2ray $env:TAG" --notes-file notes.md

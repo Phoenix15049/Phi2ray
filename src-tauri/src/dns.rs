@@ -45,14 +45,15 @@ pub async fn ping(address: &str, proxy: Option<&crate::probe::LocalProxy>) -> Re
     Ok(best)
 }
 
-/// Encrypted resolvers reached by IP, so finding them needs no DNS of its own.
-const BOOTSTRAP_DOH: [&str; 2] = ["https://1.1.1.1/dns-query", "https://8.8.8.8/dns-query"];
-/// Kept short: if DoH is blocked, connecting falls back to the system's DNS without much delay.
+/// Encrypted resolvers reached by IP, so finding them needs no DNS of its own. Three operators,
+/// so one being blocked or down doesn't send the lookup to the network's DNS.
+const BOOTSTRAP_DOH: [&str; 3] = ["https://1.1.1.1/dns-query", "https://8.8.8.8/dns-query", "https://9.9.9.9/dns-query"];
+/// Kept short: if DoH is blocked, connecting falls back without much delay.
 const BOOTSTRAP_TIMEOUT: Duration = Duration::from_millis(1500);
 
 /// The server's IPv4 addresses over DNS-over-HTTPS, before the tunnel exists: the network's
-/// own DNS doesn't see the name and can't hand back a fake answer. Both resolvers are asked at
-/// once and the first useful answer wins. Empty if neither answers in time.
+/// own DNS doesn't see the name and can't hand back a fake answer. All resolvers are asked at
+/// once and the first useful answer wins. Empty if none answers in time.
 pub async fn resolve_bootstrap(name: &str, proxy: Option<&crate::probe::LocalProxy>) -> Vec<std::net::IpAddr> {
     let valid = !name.is_empty()
         && name.len() <= 253
@@ -67,47 +68,32 @@ pub async fn resolve_bootstrap(name: &str, proxy: Option<&crate::probe::LocalPro
     };
     let Ok(client) = client.build() else { return Vec::new() };
     let query = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(query_packet(name));
-    let ask = |server: &'static str| {
-        let (client, query) = (client.clone(), query.clone());
-        async move {
-            let url = format!("{server}?dns={query}");
-            let resp = client.get(url).header("accept", "application/dns-message").send().await.ok()?;
-            if !resp.status().is_success() {
-                return None;
-            }
-            let body = resp.bytes().await.ok()?;
-            let ips = a_records(&body);
-            (!ips.is_empty()).then_some(ips)
-        }
-    };
-    let (a, b) = (Box::pin(ask(BOOTSTRAP_DOH[0])), Box::pin(ask(BOOTSTRAP_DOH[1])));
+    let (tx, mut rx) = tokio::sync::mpsc::channel(BOOTSTRAP_DOH.len());
+    for server in BOOTSTRAP_DOH {
+        let (client, url, tx) = (client.clone(), format!("{server}?dns={query}"), tx.clone());
+        tauri::async_runtime::spawn(async move {
+            let ask = async {
+                let resp = client.get(url).header("accept", "application/dns-message").send().await.ok()?;
+                if !resp.status().is_success() {
+                    return None;
+                }
+                let ips = a_records(&resp.bytes().await.ok()?);
+                (!ips.is_empty()).then_some(ips)
+            };
+            let _ = tx.send(ask.await).await;
+        });
+    }
+    drop(tx);
     let first = tokio::time::timeout(BOOTSTRAP_TIMEOUT, async {
-        match futures_select(a, b).await {
-            (Some(ips), _) => Some(ips),
-            (None, other) => other.await,
+        while let Some(answer) = rx.recv().await {
+            if answer.is_some() {
+                return answer;
+            }
         }
+        None
     })
     .await;
     first.ok().flatten().unwrap_or_default().into_iter().map(std::net::IpAddr::V4).collect()
-}
-
-/// Waits for whichever future finishes first; returns its result and the one still running.
-async fn futures_select<F>(a: std::pin::Pin<Box<F>>, b: std::pin::Pin<Box<F>>) -> (F::Output, std::pin::Pin<Box<F>>)
-where
-    F: std::future::Future,
-{
-    let mut a = Some(a);
-    let mut b = Some(b);
-    std::future::poll_fn(move |cx| {
-        if let std::task::Poll::Ready(out) = a.as_mut().unwrap().as_mut().poll(cx) {
-            return std::task::Poll::Ready((out, b.take().unwrap()));
-        }
-        if let std::task::Poll::Ready(out) = b.as_mut().unwrap().as_mut().poll(cx) {
-            return std::task::Poll::Ready((out, a.take().unwrap()));
-        }
-        std::task::Poll::Pending
-    })
-    .await
 }
 
 /// The IPv4 addresses (type A) in a DNS response; empty for errors or anything malformed.

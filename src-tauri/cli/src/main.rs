@@ -7,10 +7,11 @@
 #[path = "../../src/ipc.rs"]
 #[allow(dead_code)]
 mod ipc;
+mod clipboard;
 mod pipe;
 mod start;
 
-use std::io::Read;
+use std::io::{IsTerminal, Read};
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -36,8 +37,10 @@ Servers
   servers [GROUP]           List servers
   groups                    List groups and subscriptions
   test [SERVER...]          Measure delays (all servers, or --group GROUP)
-  add LINK... | URL | -     Add links (- reads them from stdin) or a subscription URL
+  add                       Add the links (or a subscription URL) on the clipboard
                             to the default group, or to --group GROUP
+  add -                     The same, reading them from stdin
+  add LINK... | URL         The same, from the command line (stays in shell history)
   update [GROUP]            Update subscriptions
 
 App
@@ -170,11 +173,18 @@ fn run(mut args: Vec<String>, json: bool) -> Result<(), Failure> {
         }
         "add" | "import" => {
             let group = take_option(&mut args, &["--group", "-g"])?;
-            let text = if args.is_empty() || args == ["-"] {
+            let text = if args == ["-"] || (args.is_empty() && !std::io::stdin().is_terminal()) {
                 let mut text = String::new();
                 std::io::stdin().read_to_string(&mut text).map_err(|e| format!("cannot read stdin: {e}"))?;
                 text
+            } else if args.is_empty() {
+                clipboard::text()?
             } else {
+                // Links and subscription URLs carry passwords and tokens, and the shell has just
+                // saved them to its history.
+                if !json && args.iter().any(|a| a.contains("://")) {
+                    eprintln!("Tip: links typed here stay in the shell's history. Copy them and run `phi2ray add` instead.");
+                }
                 args.join("\n")
             };
             let view: AddView = call(Command::Add { text, group })?;

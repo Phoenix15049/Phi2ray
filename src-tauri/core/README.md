@@ -21,6 +21,9 @@ cd src-tauri/core
 sha256sum geoip.dat geosite.dat libcronet.dll sing-box.exe xray.exe > SHA256SUMS
 ```
 
+The release workflow (`.github/workflows/release.yml`) downloads the cores itself; when you
+update them, also update `XRAY_VERSION` and `SING_BOX_VERSION` there.
+
 Release builds always embed the cores (`npm run build:exe`). A release without them would run
 cores from a folder normal users can write to, while Phi2ray runs as administrator.
 

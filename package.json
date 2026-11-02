@@ -1,14 +1,14 @@
 {
   "name": "phi2ray",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "A small, careful Xray client for Windows: VPN mode, kill switch, split tunnelling and subscriptions.",
   "author": "M.R. Yadollahi",
   "license": "MIT",
-  "homepage": "https://github.com/YOUR_GITHUB_USERNAME/Phi2ray",
+  "homepage": "https://github.com/Phoenix15049/Phi2ray",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/YOUR_GITHUB_USERNAME/Phi2ray.git"
+    "url": "git+https://github.com/Phoenix15049/Phi2ray.git"
   },
   "type": "module",
   "scripts": {

@@ -1,11 +1,11 @@
 [package]
 name = "phi2ray"
-version = "0.1.1"
+version = "0.1.2"
 description = "A small, careful Xray client for Windows: VPN mode, kill switch, split tunnelling and subscriptions."
 authors = ["M.R. Yadollahi"]
 license = "MIT"
-repository = "https://github.com/YOUR_GITHUB_USERNAME/Phi2ray"
-homepage = "https://github.com/YOUR_GITHUB_USERNAME/Phi2ray"
+repository = "https://github.com/Phoenix15049/Phi2ray"
+homepage = "https://github.com/Phoenix15049/Phi2ray"
 readme = "../README.md"
 keywords = ["xray", "vless", "vpn", "proxy", "tauri"]
 edition = "2021"

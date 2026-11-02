@@ -36,6 +36,9 @@ const MAX_FAILURES: u32 = 3;
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 /// A remembered server address is only used as a fallback for this long.
 const RESOLVED_MAX_AGE_SECS: u64 = 30 * 86_400;
+/// When encrypted DNS fails, an address confirmed this recently is used before asking the
+/// network's DNS, which would see the server's name.
+const RESOLVED_RECENT_SECS: u64 = 7 * 86_400;
 
 #[derive(Clone, Copy, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -606,16 +609,30 @@ fn resolve_server(state: &AppState, address: &str, port: u16) -> Result<IpAddr, 
     // 10.10.34.36, for example). That's never the real server, so it's neither used nor kept.
     let public = |ips: Vec<IpAddr>| -> Vec<IpAddr> { ips.into_iter().filter(|ip| crate::netinfo::is_public(*ip)).collect() };
     // Encrypted DNS first (through the current connection when there is one), so the network's
-    // own DNS neither sees the server's name nor gets to answer it. System DNS is the fallback.
+    // own DNS neither sees the server's name nor gets to answer it.
     let doh = tauri::async_runtime::block_on(crate::dns::resolve_bootstrap(address, internal_proxy(state).as_ref()));
     let mut answered = !doh.is_empty();
     let mut found = public(doh);
+    let now = now_ms() / 1000;
     if found.is_empty() {
+        // Then an address confirmed in the last few days, still without telling the network
+        // which server this is. Only after that, the network's own DNS.
+        let recent = {
+            let store = state.store.lock().unwrap();
+            store
+                .resolved
+                .get(address)
+                .copied()
+                .filter(|_| store.resolved_at.get(address).is_some_and(|&t| now.saturating_sub(t) <= RESOLVED_RECENT_SECS))
+        };
+        if let Some(ip) = recent {
+            log(state, "[app] Encrypted DNS didn't answer; using the server's recently confirmed address");
+            return Ok(ip);
+        }
         let system: Vec<IpAddr> = (address, port).to_socket_addrs().map(|a| a.map(|a| a.ip()).collect()).unwrap_or_default();
         answered |= !system.is_empty();
         found = public(system);
     }
-    let now = now_ms() / 1000;
     let mut store = state.store.lock().unwrap();
     match found.iter().find(|ip| ip.is_ipv4()).or(found.first()) {
         Some(&ip) => {

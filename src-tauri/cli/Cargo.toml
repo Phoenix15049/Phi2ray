@@ -1,6 +1,6 @@
 [package]
 name = "phi2ray-cli"
-version = "0.1.1"
+version = "0.1.2"
 description = "The phi2ray console command: controls the running Phi2ray app."
 authors = ["M.R. Yadollahi"]
 license = "MIT"
@@ -27,7 +27,9 @@ windows-sys = { version = "0.59", features = [
   "Win32_Security_Authorization",
   "Win32_Storage_FileSystem",
   "Win32_System_Com",
+  "Win32_System_DataExchange",
   "Win32_System_IO",
+  "Win32_System_Memory",
   "Win32_System_Pipes",
   "Win32_System_Registry",
   "Win32_System_Threading",
