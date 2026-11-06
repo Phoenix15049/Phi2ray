@@ -68,6 +68,7 @@ export type Settings = {
   socksPort: number;
   httpPort: number;
   logLevel: "warning" | "info" | "debug";
+  logLines: number;
   testUrl: string;
   language: "en" | "fa";
   theme: "system" | "light" | "dark";

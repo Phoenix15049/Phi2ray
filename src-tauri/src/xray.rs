@@ -26,7 +26,8 @@ pub const SING_BOX_EXE: &str = "sing-box";
 #[cfg(windows)]
 pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-const MAX_LOG_LINES: usize = 1000;
+/// Lines kept until the settings say otherwise.
+const DEFAULT_LOG_LINES: usize = 1000;
 /// Starts the error returned when another program holds one of xray's ports.
 pub const PORT_TAKEN: &str = "Local port";
 /// Longer lines are cut, so one runaway message can't take much memory.
@@ -36,19 +37,33 @@ pub type Logs = Arc<Mutex<LogBuf>>;
 
 /// The newest log lines, numbered: `total` counts every line ever added, so a reader can ask
 /// for only the lines after the last one it saw (the console tool's `logs --follow`).
-#[derive(Default)]
 pub struct LogBuf {
     lines: VecDeque<String>,
     total: u64,
+    limit: usize,
+}
+
+impl Default for LogBuf {
+    fn default() -> Self {
+        Self { lines: VecDeque::new(), total: 0, limit: DEFAULT_LOG_LINES }
+    }
 }
 
 impl LogBuf {
     pub fn push(&mut self, line: String) {
-        while self.lines.len() >= MAX_LOG_LINES {
+        while self.lines.len() >= self.limit {
             self.lines.pop_front();
         }
         self.lines.push_back(line);
         self.total += 1;
+    }
+
+    /// Keeps at most `limit` lines from now on, dropping the oldest if there are more already.
+    pub fn set_limit(&mut self, limit: usize) {
+        self.limit = limit.max(1);
+        while self.lines.len() > self.limit {
+            self.lines.pop_front();
+        }
     }
 
     pub fn all(&self) -> Vec<String> {
@@ -266,7 +281,7 @@ fn wait_for_adapter(child: &mut Child) -> Result<(), Option<std::process::ExitSt
     }
 }
 
-/// Adds a line to the shared log, keeping only the newest `MAX_LOG_LINES`.
+/// Adds a line to the shared log, keeping only the newest ones.
 pub fn push_log(logs: &Logs, mut line: String) {
     if line.len() > MAX_LINE_LEN {
         let cut = (0..=MAX_LINE_LEN).rev().find(|&i| line.is_char_boundary(i)).unwrap_or(0);
@@ -336,5 +351,19 @@ mod tests {
         assert_eq!(logs.since(Some(6), usize::MAX), (vec![], 6));
         logs.push("line 6".into());
         assert_eq!(logs.since(Some(6), usize::MAX).0, vec!["line 6".to_string()]);
+    }
+
+    #[test]
+    fn the_log_keeps_only_the_chosen_number_of_lines() {
+        let mut logs = LogBuf::default();
+        for i in 0..5 {
+            logs.push(format!("line {i}"));
+        }
+        logs.set_limit(2);
+        assert_eq!(logs.all(), ["line 3", "line 4"]);
+        logs.push("line 5".into());
+        assert_eq!(logs.all(), ["line 4", "line 5"]);
+        // The numbering still counts every line.
+        assert_eq!(logs.since(Some(5), usize::MAX), (vec!["line 5".to_string()], 6));
     }
 }

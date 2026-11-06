@@ -1,6 +1,6 @@
 [package]
 name = "phi2ray"
-version = "0.1.2"
+version = "0.1.3"
 description = "A small, careful Xray client for Windows: VPN mode, kill switch, split tunnelling and subscriptions."
 authors = ["M.R. Yadollahi"]
 license = "MIT"

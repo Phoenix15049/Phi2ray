@@ -248,7 +248,7 @@ const handlers: Record<string, (args: Record<string, any>) => unknown> = {
     );
   },
   about: () => ({
-    app: "0.1.2",
+    app: "0.1.3",
     xray: "26.10.21",
     singBox: "1.14.4",
     coreDir: "C:\\Phi2ray\\core",

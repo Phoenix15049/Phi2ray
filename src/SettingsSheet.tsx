@@ -1,7 +1,7 @@
 import { ReactNode, useEffect, useRef, useState } from "react";
 import { About, api, Mode, Settings, Status } from "./api";
 import { StringKey, T, useT } from "./i18n";
-import { Icon, revealInStrip, Segmented, Sheet, Switch, useSlidingMarker } from "./ui";
+import { Icon, revealInStrip, Segmented, Sheet, Switch } from "./ui";
 
 export const modeOptions = (t: T): { id: Mode; label: string; hint: string }[] => [
   { id: "tun", label: t("modeVpn"), hint: t("modeVpnHint") },
@@ -26,6 +26,8 @@ const TEST_URL_PRESETS = [
 
 const CUSTOM = "custom";
 
+const LOG_LINES = [100, 500, 1000, 2000, 5000];
+
 type Props = {
   settings: Settings;
   status: Status;
@@ -40,48 +42,48 @@ type Props = {
   onClose: () => void;
 };
 
-const SECTIONS: StringKey[] = [
-  "appearance",
-  "connection",
-  "protection",
-  "splitTunnel",
-  "routing",
-  "dns",
-  "vpnAdapter",
-  "localProxy",
-  "diagnostics",
-  "consoleSection",
-  "about",
+const SECTIONS: { key: StringKey; icon: () => ReactNode }[] = [
+  { key: "appearance", icon: Icon.palette },
+  { key: "connection", icon: Icon.plug },
+  { key: "protection", icon: Icon.shield },
+  { key: "splitTunnel", icon: () => Icon.split() },
+  { key: "routing", icon: Icon.route },
+  { key: "dns", icon: Icon.globe },
+  { key: "vpnAdapter", icon: Icon.chip },
+  { key: "localProxy", icon: Icon.hash },
+  { key: "diagnostics", icon: Icon.pulse },
+  { key: "consoleSection", icon: Icon.terminal },
+  { key: "about", icon: Icon.info },
 ];
 
-/** A strip of section names: shows where you are in the long page, and jumps there on a click. */
+/** One icon per section; the current one opens up to show its name. Follows the scroll, and jumps on a click. */
 function SectionNav() {
   const t = useT();
-  const [current, setCurrent] = useState<StringKey>(SECTIONS[0]);
+  const [current, setCurrent] = useState<StringKey>(SECTIONS[0].key);
+  const strip = useRef<HTMLElement>(null);
   const jumped = useRef(0);
-  const { strip, marker } = useSlidingMarker(current, [t]);
 
   useEffect(() => {
     const body = strip.current?.parentElement?.querySelector<HTMLElement>(".page-body");
     if (!body) return;
     const onScroll = () => {
-      if (Date.now() - jumped.current < 500) return;
+      if (Date.now() - jumped.current < 600) return;
       const line = body.getBoundingClientRect().top + 72;
-      let found = SECTIONS[0];
-      for (const key of SECTIONS) {
+      let found = SECTIONS[0].key;
+      for (const { key } of SECTIONS) {
         const section = body.querySelector(`[data-section="${key}"]`);
         if (section && section.getBoundingClientRect().top <= line) found = key;
       }
-      if (body.scrollTop + body.clientHeight >= body.scrollHeight - 2) found = SECTIONS[SECTIONS.length - 1];
+      if (body.scrollTop + body.clientHeight >= body.scrollHeight - 2) found = SECTIONS[SECTIONS.length - 1].key;
       setCurrent(found);
     };
     body.addEventListener("scroll", onScroll, { passive: true });
     return () => body.removeEventListener("scroll", onScroll);
-  }, [strip]);
+  }, []);
 
   useEffect(() => {
-    revealInStrip(strip.current, strip.current?.querySelector(`[data-key="${current}"]`));
-  }, [current, strip]);
+    revealInStrip(strip.current, strip.current?.querySelector(".active"));
+  }, [current]);
 
   const jump = (key: StringKey) => {
     jumped.current = Date.now();
@@ -91,11 +93,13 @@ function SectionNav() {
   };
 
   return (
-    <nav className="section-nav tabs" ref={strip} aria-label={t("settings")}>
-      <span className="tab-marker" ref={marker} aria-hidden="true" />
-      {SECTIONS.map((key) => (
-        <button key={key} data-key={key} className={`tab ${key === current ? "active" : ""}`} onClick={() => jump(key)}>
-          {t(key)}
+    <nav className="section-nav" ref={strip} aria-label={t("settings")}>
+      {SECTIONS.map(({ key, icon }) => (
+        <button key={key} className={key === current ? "active" : ""} onClick={() => jump(key)} aria-label={t(key)} title={t(key)}>
+          {icon()}
+          <span className="section-name">
+            <span>{t(key)}</span>
+          </span>
         </button>
       ))}
     </nav>
@@ -118,7 +122,7 @@ export function SettingsSheet(p: Props) {
 
       <Section id="appearance">
         <Group>
-          <Row title={t("language")}>
+          <Row icon={Icon.language()} title={t("language")}>
             <Segmented
               label={t("language")}
               value={s.language}
@@ -129,7 +133,7 @@ export function SettingsSheet(p: Props) {
               onChange={(language) => p.onChange({ language })}
             />
           </Row>
-          <Row title={t("theme")}>
+          <Row icon={Icon.moon()} title={t("theme")}>
             <Segmented
               label={t("theme")}
               value={s.theme}
@@ -141,10 +145,10 @@ export function SettingsSheet(p: Props) {
               onChange={(theme) => p.onChange({ theme })}
             />
           </Row>
-          <Row title={t("alwaysOnTop")} hint={t("alwaysOnTopHint")}>
+          <Row icon={Icon.pin()} title={t("alwaysOnTop")} hint={t("alwaysOnTopHint")}>
             <Switch checked={s.alwaysOnTop} onChange={(v) => p.onChange({ alwaysOnTop: v })} label={t("alwaysOnTop")} />
           </Row>
-          <Row title={t("minimizeToTray")} hint={t("minimizeToTrayHint")}>
+          <Row icon={Icon.tray()} title={t("minimizeToTray")} hint={t("minimizeToTrayHint")}>
             <Switch checked={s.minimizeToTray} onChange={(v) => p.onChange({ minimizeToTray: v })} label={t("minimizeToTray")} />
           </Row>
         </Group>
@@ -172,7 +176,7 @@ export function SettingsSheet(p: Props) {
           ))}
         </div>
         <Group>
-          <Row title={t("connectOnLaunch")} hint={t("connectOnLaunchHint")}>
+          <Row icon={Icon.play()} title={t("connectOnLaunch")} hint={t("connectOnLaunchHint")}>
             <Switch checked={s.autoConnect} onChange={(v) => p.onChange({ autoConnect: v })} label={t("connectOnLaunch")} />
           </Row>
         </Group>
@@ -180,10 +184,10 @@ export function SettingsSheet(p: Props) {
 
       <Section id="protection">
         <Group>
-          <Row title={t("killSwitch")} hint={t("killSwitchHint")}>
+          <Row icon={Icon.lock(18)} title={t("killSwitch")} hint={t("killSwitchHint")}>
             <Switch checked={s.killSwitch} onChange={(v) => p.onChange({ killSwitch: v })} label={t("killSwitch")} />
           </Row>
-          <Row title={t("autoReconnect")} hint={t("autoReconnectHint")}>
+          <Row icon={Icon.refresh()} title={t("autoReconnect")} hint={t("autoReconnectHint")}>
             <Switch checked={s.autoReconnect} onChange={(v) => p.onChange({ autoReconnect: v })} label={t("autoReconnect")} />
           </Row>
         </Group>
@@ -206,16 +210,16 @@ export function SettingsSheet(p: Props) {
 
       <Section id="routing">
         <Group>
-          <Row title={t("bypassLan")} hint={t("bypassLanHint")}>
+          <Row icon={Icon.home()} title={t("bypassLan")} hint={t("bypassLanHint")}>
             <Switch checked={s.bypassLan} onChange={(v) => p.onChange({ bypassLan: v })} label={t("bypassLan")} />
           </Row>
-          <Row title={t("iranDirect")} hint={t("iranDirectHint")}>
+          <Row icon={Icon.flag()} title={t("iranDirect")} hint={t("iranDirectHint")}>
             <Switch checked={s.iranDirect} onChange={(v) => p.onChange({ iranDirect: v })} label={t("iranDirect")} />
           </Row>
-          <Row title={t("blockAds")} hint={t("blockAdsHint")}>
+          <Row icon={Icon.ban()} title={t("blockAds")} hint={t("blockAdsHint")}>
             <Switch checked={s.blockAds} onChange={(v) => p.onChange({ blockAds: v })} label={t("blockAds")} />
           </Row>
-          <Row title={t("blockQuic")} hint={t("blockQuicHint")}>
+          <Row icon={Icon.noBolt()} title={t("blockQuic")} hint={t("blockQuicHint")}>
             <Switch checked={s.blockQuic} onChange={(v) => p.onChange({ blockQuic: v })} label={t("blockQuic")} />
           </Row>
         </Group>
@@ -224,7 +228,7 @@ export function SettingsSheet(p: Props) {
       <Section id="dns" hint={t("dnsHint")}>
         <DnsPicker value={s.remoteDns} connected={!!p.status.session} onCommit={(remoteDns) => p.onChange({ remoteDns })} />
         <Group>
-          <Row title={t("ipv6")} hint={t("ipv6Hint")}>
+          <Row icon={Icon.globe()} title={t("ipv6")} hint={t("ipv6Hint")}>
             <Switch checked={s.ipv6} onChange={(v) => p.onChange({ ipv6: v })} label={t("ipv6")} />
           </Row>
         </Group>
@@ -232,17 +236,17 @@ export function SettingsSheet(p: Props) {
 
       <Section id="vpnAdapter">
         <Group>
-          <Row title={t("networkStack")} hint={t("networkStackHint")}>
+          <Row icon={Icon.layers()} title={t("networkStack")} hint={t("networkStackHint")}>
             <select className="select" value={s.tunStack} onChange={(e) => p.onChange({ tunStack: e.target.value as Settings["tunStack"] })}>
               <option value="mixed">Mixed</option>
               <option value="system">System</option>
               <option value="gvisor">gVisor</option>
             </select>
           </Row>
-          <Row title={t("mtu")} hint={t("mtuHint")}>
+          <Row icon={Icon.ruler()} title={t("mtu")} hint={t("mtuHint")}>
             <NumberField label={t("mtu")} value={s.tunMtu} min={1280} max={9000} onCommit={(v) => p.onChange({ tunMtu: v })} />
           </Row>
-          <Row title={t("strictRoute")} hint={t("strictRouteHint")}>
+          <Row icon={Icon.route()} title={t("strictRoute")} hint={t("strictRouteHint")}>
             <Switch checked={s.strictRoute} onChange={(v) => p.onChange({ strictRoute: v })} label={t("strictRoute")} />
           </Row>
         </Group>
@@ -250,15 +254,15 @@ export function SettingsSheet(p: Props) {
 
       <Section id="localProxy" hint={t("localProxyHint")}>
         <Group>
-          <Row title={t("fixedPorts")} hint={t("fixedPortsHint")}>
+          <Row icon={Icon.pin()} title={t("fixedPorts")} hint={t("fixedPortsHint")}>
             <Switch checked={s.fixedPorts} onChange={(v) => p.onChange({ fixedPorts: v })} label={t("fixedPorts")} />
           </Row>
           {s.fixedPorts && (
             <>
-              <Row title={t("socksPort")}>
+              <Row icon={Icon.hash()} title={t("socksPort")}>
                 <NumberField label={t("socksPort")} value={s.socksPort} min={1024} max={65535} onCommit={(v) => p.onChange({ socksPort: v })} />
               </Row>
-              <Row title={t("httpPort")}>
+              <Row icon={Icon.hash()} title={t("httpPort")}>
                 <NumberField label={t("httpPort")} value={s.httpPort} min={1024} max={65535} onCommit={(v) => p.onChange({ httpPort: v })} />
               </Row>
             </>
@@ -268,14 +272,23 @@ export function SettingsSheet(p: Props) {
 
       <Section id="diagnostics">
         <Group>
-          <Row title={t("logLevel")} hint={t("logLevelHint")}>
+          <Row icon={Icon.pulse()} title={t("logLevel")} hint={t("logLevelHint")}>
             <select className="select" value={s.logLevel} onChange={(e) => p.onChange({ logLevel: e.target.value as Settings["logLevel"] })}>
               <option value="warning">Warning</option>
               <option value="info">Info</option>
               <option value="debug">Debug</option>
             </select>
           </Row>
-          <Row title={t("testUrl")} hint={t("testUrlHint")}>
+          <Row icon={Icon.list()} title={t("logLines")} hint={t("logLinesHint")}>
+            <select className="select" value={s.logLines} onChange={(e) => p.onChange({ logLines: Number(e.target.value) })}>
+              {LOG_LINES.map((n) => (
+                <option key={n} value={n}>
+                  {n}
+                </option>
+              ))}
+            </select>
+          </Row>
+          <Row icon={Icon.link()} title={t("testUrl")} hint={t("testUrlHint")}>
             <PresetOrCustom value={s.testUrl} presets={TEST_URL_PRESETS} placeholder="http://…" onCommit={(v) => p.onChange({ testUrl: v })} />
           </Row>
         </Group>
@@ -283,7 +296,7 @@ export function SettingsSheet(p: Props) {
 
       <Section id="consoleSection">
         <Group>
-          <Row title={t("consoleCommand")} hint={t("consoleCommandHint")}>
+          <Row icon={Icon.terminal()} title={t("consoleCommand")} hint={t("consoleCommandHint")}>
             <Switch checked={s.console} onChange={(v) => p.onChange({ console: v })} label={t("consoleCommand")} />
           </Row>
         </Group>
@@ -408,9 +421,13 @@ function DnsPicker(props: { value: string; connected: boolean; onCommit: (v: str
 
 function Section(props: { id: StringKey; hint?: string; children: ReactNode }) {
   const t = useT();
+  const icon = SECTIONS.find((s) => s.key === props.id)?.icon;
   return (
     <section className="settings-section" data-section={props.id}>
-      <h3>{t(props.id)}</h3>
+      <h3>
+        <span className="section-icon">{icon?.()}</span>
+        {t(props.id)}
+      </h3>
       {props.hint && <p className="section-hint">{props.hint}</p>}
       {props.children}
     </section>
@@ -421,9 +438,10 @@ function Group({ children }: { children: ReactNode }) {
   return <div className="group">{children}</div>;
 }
 
-function Row(props: { title: string; hint?: string; children: ReactNode }) {
+function Row(props: { icon?: ReactNode; title: string; hint?: string; children: ReactNode }) {
   return (
     <div className="row-setting">
+      {props.icon && <span className="row-icon">{props.icon}</span>}
       <div className="row-text">
         <strong>{props.title}</strong>
         {props.hint && <span>{props.hint}</span>}

@@ -383,6 +383,7 @@ pub(crate) fn save_settings(app: &AppHandle, state: &AppState, mut settings: Set
         console::apply(app, settings.console)?;
     }
     apply_window_settings(app, &settings);
+    state.logs.lock().unwrap().set_limit(settings.log_lines as usize);
     let mut store = state.store.lock().unwrap();
     store.settings = settings.clone();
     store.save(&state.paths.store)?;
@@ -726,6 +727,7 @@ pub fn run() {
             tauri::async_runtime::spawn(subscription_updater(app.handle().clone()));
             let settings = app.state::<AppState>().store.lock().unwrap().settings.clone();
             apply_window_settings(app.handle(), &settings);
+            app.state::<AppState>().logs.lock().unwrap().set_limit(settings.log_lines as usize);
             tray::create(app.handle())?;
             console::startup(app.handle());
             // `phi2ray start` launches the app into the tray; otherwise the window opens.

@@ -82,6 +82,8 @@ pub struct Settings {
 
     // Diagnostics
     pub log_level: String,
+    /// How many log lines are kept in memory.
+    pub log_lines: u32,
     pub test_url: String,
 
     // Appearance and window
@@ -119,6 +121,7 @@ impl Default for Settings {
             socks_port: 10808,
             http_port: 10809,
             log_level: "warning".into(),
+            log_lines: 1000,
             test_url: "http://www.gstatic.com/generate_204".into(),
             language: "en".into(),
             theme: "system".into(),
@@ -139,6 +142,9 @@ impl Settings {
         }
         if !matches!(self.log_level.as_str(), "warning" | "info" | "debug") {
             return Err("Unknown log level.".into());
+        }
+        if !(100..=5000).contains(&self.log_lines) {
+            return Err("Log length must be between 100 and 5000 lines.".into());
         }
         if !matches!(self.language.as_str(), "en" | "fa") {
             return Err("Unknown language.".into());

@@ -22,6 +22,7 @@ export const DEFAULT_SETTINGS: Settings = {
   socksPort: 10808,
   httpPort: 10809,
   logLevel: "warning",
+  logLines: 1000,
   testUrl: "http://www.gstatic.com/generate_204",
   language: "en",
   theme: "system",

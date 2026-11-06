@@ -97,8 +97,10 @@ out of your way. It ships as one `.exe`, about 45 MB, with both cores inside.
 - Sits in the tray. Minimizing hides it there, and if you close it while connected, it asks first.
   A dot on the tray icon tells you the state at a glance: blue when connected, orange while
   reconnecting, red when the kill switch is holding the internet blocked, none when off.
-- Dark and light themes, and a full Persian interface. Scroll down (or click the bar at the
-  bottom) to bring up your servers; the connection stays in reach at the top.
+- Dark and light themes, and a full Persian interface. Scroll, drag or click the bar at the bottom
+  to bring up your servers, half way with the lens still in reach or all the way; click the top
+  of the window to fold them back.
+- Choose how many log lines are kept, from 100 to 5000, under Settings → Diagnostics.
 
 **From the terminal**
 
@@ -294,6 +296,11 @@ That's expected. Only VPN mode can see which app a connection comes from. Sites 
 **Some VLESS configs without TLS won't connect.**
 Newer Xray versions refuse unencrypted VLESS unless the server is on a private network. That's
 Xray protecting you, not something Phi2ray adds.
+
+## Code signing and privacy
+
+See the [code signing policy](CODE_SIGNING.md), which also explains how to remove Phi2ray, and
+the [privacy policy](PRIVACY.md).
 
 ## Thanks
 

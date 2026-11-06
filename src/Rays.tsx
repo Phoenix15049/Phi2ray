@@ -2,14 +2,12 @@ import { useEffect, useRef } from "react";
 
 export type RayState = "idle" | "connecting" | "connected" | "warning" | "disconnecting" | "blocked";
 
-/** The lens sits on the golden section of the stage: 1 / φ² of the way across. */
-export const LENS = 0.382;
+/** The lens sits in the middle of the stage. */
+const LENS = 0.5;
 
 type Rgb = [number, number, number];
-const THISTLE: Rgb = [219, 194, 207];
-const CERULEAN: Rgb = [111, 179, 194];
-const AMBER: Rgb = [233, 190, 120];
-const CORAL: Rgb = [232, 138, 138];
+const DARK_INK = { down: [219, 194, 207], up: [111, 179, 194], warn: [233, 190, 120], cut: [232, 138, 138], spark: [255, 255, 255] } as Record<string, Rgb>;
+const LIGHT_INK = { down: [158, 86, 126], up: [44, 116, 134], warn: [186, 118, 24], cut: [192, 72, 80], spark: [255, 255, 255] } as Record<string, Rgb>;
 
 const mix = (a: Rgb, b: Rgb, t: number): Rgb => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
 const rgba = (c: Rgb, alpha: number) => `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${alpha})`;
@@ -32,7 +30,7 @@ const TARGET: Record<RayState, { reach: number; energy: number; warn: number; cu
  * real state, not decoration. Behind the closed lens they stop; once it opens they reach across
  * the stage, and their weight, pace and the pulses along them follow the actual traffic.
  */
-export function Rays(props: { state: RayState; down: number; up: number; mirror: boolean; paused: boolean }) {
+export function Rays(props: { state: RayState; down: number; up: number; mirror: boolean; paused: boolean; light: boolean }) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const live = useRef(props);
   live.current = props;
@@ -68,7 +66,8 @@ export function Rays(props: { state: RayState; down: number; up: number; mirror:
 
     const draw = (at: number) => {
       frame = requestAnimationFrame(draw);
-      const { state, down, up, mirror, paused } = live.current;
+      const { state, down, up, mirror, paused, light } = live.current;
+      const ink = light ? LIGHT_INK : DARK_INK;
       const resting = state === "idle" || state === "blocked";
       // Nothing to watch while hidden or covered, and a resting stage doesn't need every frame.
       if (document.hidden || paused || (resting && ++tick % 2 && now.reach < 0.01)) {
@@ -120,11 +119,12 @@ export function Rays(props: { state: RayState; down: number; up: number; mirror:
       };
 
       // The light gathering at the lens.
-      ctx.globalCompositeOperation = "lighter";
-      const glowColor = mix(mix(THISTLE, AMBER, now.warn), CORAL, now.cut);
+      // Light adds up on the dark stage; on the light one it has to be laid over the paper.
+      ctx.globalCompositeOperation = light ? "source-over" : "lighter";
+      const glowColor = mix(mix(ink.down, ink.warn, now.warn), ink.cut, now.cut);
       const glowSize = 70 + 90 * now.energy;
       const glow = ctx.createRadialGradient(lensX, cy, 0, lensX, cy, glowSize);
-      glow.addColorStop(0, rgba(glowColor, 0.05 + 0.26 * now.energy));
+      glow.addColorStop(0, rgba(glowColor, (light ? 0.5 : 1) * (0.05 + 0.26 * now.energy)));
       glow.addColorStop(1, rgba(glowColor, 0));
       ctx.fillStyle = glow;
       ctx.fillRect(lensX - glowSize, cy - glowSize, glowSize * 2, glowSize * 2);
@@ -132,12 +132,12 @@ export function Rays(props: { state: RayState; down: number; up: number; mirror:
       const drift = 0.5 * Math.sin(time * 0.31);
       const rays: { base: Rgb; offset: number; load: number; dir: number }[] = [
         // Download comes in from the far side; upload heads out.
-        { base: THISTLE, offset: 0, load: now.down, dir: -1 },
-        { base: CERULEAN, offset: Math.PI + drift, load: now.up, dir: 1 },
+        { base: ink.down, offset: 0, load: now.down, dir: -1 },
+        { base: ink.up, offset: Math.PI + drift, load: now.up, dir: 1 },
       ];
 
       rays.forEach((ray, i) => {
-        const color = mix(mix(ray.base, AMBER, now.warn * 0.85), CORAL, now.cut * 0.9);
+        const color = mix(mix(ray.base, ink.warn, now.warn * 0.85), ink.cut, now.cut * 0.9);
         const line = ctx.createLinearGradient(0, 0, w, 0);
         const nearAlpha = 0.28 + 0.62 * now.energy;
         const stop = (at: number, alpha: number) => line.addColorStop(Math.min(1, Math.max(0, at / w)), rgba(color, alpha));
@@ -183,7 +183,7 @@ export function Rays(props: { state: RayState; down: number; up: number; mirror:
             const x = list[p] * w;
             if (x > front) continue;
             const edge = Math.min(x / 40, (front - x) / 40, 1);
-            ctx.fillStyle = rgba(mix(color, [255, 255, 255], 0.55), 0.9 * Math.max(0, edge));
+            ctx.fillStyle = rgba(mix(color, ink.spark, light ? 0.1 : 0.55), 0.9 * Math.max(0, edge));
             ctx.beginPath();
             ctx.arc(x, y(x, ray.offset), 1.2 + 1.1 * ray.load, 0, Math.PI * 2);
             ctx.fill();
@@ -203,33 +203,43 @@ export function Rays(props: { state: RayState; down: number; up: number; mirror:
 }
 
 /** The lens: an iris that shuts the rays out when disconnected and opens to let them through. */
-export function Iris({ size = 104 }: { size?: number }) {
+export function Iris() {
   const blades = 9;
   return (
-    <svg className="iris" viewBox="-50 -50 100 100" width={size} height={size} aria-hidden="true">
+    <svg className="iris" viewBox="-64 -64 128 128" aria-hidden="true">
       <defs>
         <clipPath id="iris-clip">
-          <circle r="41" />
+          <circle r="45" />
         </clipPath>
-        <linearGradient id="iris-blade" x1="0" y1="-1" x2="1" y2="1">
-          <stop offset="0" stopColor="#2E4756" />
-          <stop offset="1" stopColor="#16262E" />
+        <linearGradient id="iris-blade" x1="0" y1="0" x2="1" y2="1">
+          <stop className="iris-blade-a" offset="0" />
+          <stop className="iris-blade-b" offset="1" />
+        </linearGradient>
+        <linearGradient id="iris-barrel" x1="0" y1="0" x2="1" y2="1">
+          <stop className="iris-barrel-a" offset="0" />
+          <stop className="iris-barrel-b" offset="0.5" />
+          <stop className="iris-barrel-a" offset="1" />
         </linearGradient>
       </defs>
-      <circle className="iris-track" r="47" />
-      <circle className="iris-rim" r="41.5" />
+      {/* Engraved scale, like a lens ring; it turns while the connection is being made. */}
+      <circle className="iris-scale" r="60" pathLength="360" />
+      <circle className="iris-arc" r="55" pathLength="100" />
+      <circle className="iris-ping" r="48" />
+      <circle className="iris-barrel" r="47.5" stroke="url(#iris-barrel)" />
       <g clipPath="url(#iris-clip)">
+        <circle className="iris-well" r="45" />
         <g className="iris-turn">
           {Array.from({ length: blades }, (_, i) => (
             <g key={i} transform={`rotate(${(360 / blades) * i})`}>
-              <path className="iris-blade" d="M0 -74 L74 -74 L74 -14 L0 16 Z" fill="url(#iris-blade)" />
+              <path className="iris-blade" d="M0 -82 L82 -82 L82 -15 L0 18 Z" fill="url(#iris-blade)" />
             </g>
           ))}
         </g>
       </g>
+      <circle className="iris-edge" r="45" />
       <g className="iris-glyph">
-        <path d="M0 -13 V-2" />
-        <path d="M-9.6 -9.2 A13 13 0 1 0 9.6 -9.2" />
+        <path pathLength="100" d="M0 -15 V-2" />
+        <path pathLength="100" d="M-9.2 -7.2 A13 13 0 1 0 9.2 -7.2" />
       </g>
     </svg>
   );

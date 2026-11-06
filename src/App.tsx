@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { About, ADMIN_REQUIRED, api, DEFAULT_GROUP, DelayResult, Group, Mode, onEvent, Profile, Settings, Status } from "./api";
 import logo from "./assets/logo.svg";
+import { useDeck } from "./deck";
 import { DEFAULT_SETTINGS } from "./defaults";
 import { AddKind, AddSheet, GroupSheet, looksLikeSubscription } from "./GroupSheets";
 import { I18n, makeT, StringKey } from "./i18n";
@@ -50,6 +51,8 @@ const LIVE_SETTINGS: (keyof Settings)[] = [
   "theme",
   "alwaysOnTop",
   "minimizeToTray",
+  "logLines",
+  "console",
 ];
 
 /** `inert` takes hidden parts of the stage and deck out of the tab order. */
@@ -57,6 +60,18 @@ const inert = (on: boolean) => (on ? ({ inert: "" } as object) : {});
 
 /** The part of the app a log line came from, for its colour. */
 const logTag = (line: string) => (line.startsWith("[app]") ? "app" : line.startsWith("[console]") ? "app" : line.startsWith("[tun]") ? "tun" : line.startsWith("[xray]") ? "xray" : "");
+
+/** Whether Windows is set to dark, followed live for the "system" theme. */
+function usePrefersDark() {
+  const [dark, setDark] = useState(() => window.matchMedia("(prefers-color-scheme: dark)").matches);
+  useEffect(() => {
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const update = () => setDark(media.matches);
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
+  return dark;
+}
 
 const EMPTY_STATUS: Status = {
   session: null,
@@ -82,7 +97,9 @@ export default function App() {
   const [query, setQuery] = useState("");
   const [sortByDelay, setSortByDelay] = useState(false);
   const [sheet, setSheet] = useState<SheetName>(null);
-  const [deckOpen, setDeckOpen] = useState(false);
+  const shell = useRef<HTMLDivElement>(null);
+  const deck = useDeck(shell);
+  const prefersDark = usePrefersDark();
   const [addPreset, setAddPreset] = useState<{ kind: AddKind; text: string }>({ kind: "links", text: "" });
   const [logs, setLogs] = useState<string[]>([]);
   const [about, setAbout] = useState<About | null>(null);
@@ -93,8 +110,6 @@ export default function App() {
   const hadSession = useRef(false);
   const logBox = useRef<HTMLDivElement>(null);
   const logFollow = useRef(true);
-  const deckScroll = useRef<HTMLDivElement>(null);
-  const lastDeckScroll = useRef(0);
 
   const t = useMemo(() => makeT(settings.language), [settings.language]);
   const tRef = useRef(t);
@@ -104,6 +119,7 @@ export default function App() {
   const phase: Phase = pending ?? (session ? session.state : "idle");
   const busy = pending !== null;
   const live = phase === "connected" || phase === "reconnecting";
+  const dark = settings.theme === "dark" || (settings.theme === "system" && prefersDark);
 
   // Language direction and theme live on <html>, so sheets and toasts follow too.
   useEffect(() => {
@@ -222,7 +238,11 @@ export default function App() {
   // Logs are fetched only while visible, so a busy core never slows the window.
   useEffect(() => {
     if (sheet !== "logs") return;
-    const load = () => api.getLogs().then(setLogs).catch(() => {});
+    const load = () =>
+      api
+        .getLogs()
+        .then((next) => setLogs((now) => (now.length === next.length && now[now.length - 1] === next[next.length - 1] ? now : next)))
+        .catch(() => {});
     load();
     const timer = setInterval(load, 1000);
     return () => clearInterval(timer);
@@ -257,12 +277,13 @@ export default function App() {
   }, [activeGroup, groups.length, strip]);
 
   // Escape folds the deck away (a page or dialog on top takes it first).
+  const { snap, go: deckGo } = deck;
   useEffect(() => {
-    if (!deckOpen || sheet) return;
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setDeckOpen(false);
+    if (!snap || sheet) return;
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && deckGo(0);
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [deckOpen, sheet]);
+  }, [snap, sheet, deckGo]);
 
   const saveSettings = async (next: Settings) => {
     const previous = settings;
@@ -443,16 +464,15 @@ export default function App() {
     if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) e.currentTarget.scrollLeft += settings.language === "fa" ? -e.deltaY : e.deltaY;
   };
 
-  /** Scrolling down over the stage brings the servers up, unless the stage itself has to scroll. */
+  /** The wheel over the stage moves the deck, unless the stage itself has to scroll. */
   const onStageWheel = (e: React.WheelEvent<HTMLElement>) => {
     const el = e.currentTarget;
-    if (e.deltaY > 0 && el.scrollHeight <= el.clientHeight + 1) setDeckOpen(true);
+    if (snap > 0 || el.scrollHeight <= el.clientHeight + 1) deck.onWheel(e);
   };
 
-  /** Scrolling further up at the top of the list folds it away; a scroll that just got there doesn't. */
-  const onDeckWheel = (e: React.WheelEvent<HTMLDivElement>) => {
-    const atTop = (deckScroll.current?.scrollTop ?? 0) <= 0;
-    if (e.deltaY < 0 && atTop && Date.now() - lastDeckScroll.current > 250) setDeckOpen(false);
+  /** A click on an empty part of the stage folds the deck back down. */
+  const foldDeck = (e: React.MouseEvent) => {
+    if (snap > 0 && !(e.target as Element).closest("button")) deckGo(0);
   };
 
   const visible = useMemo(() => {
@@ -489,13 +509,23 @@ export default function App() {
     return `${days} ${t("daysLeft")}`;
   };
 
+  const logLines = useMemo(
+    () =>
+      logs.map((line, i) => (
+        <div key={i} className={`log-line ${logTag(line)}`}>
+          {line}
+        </div>
+      )),
+    [logs],
+  );
+
   const word = status.blocked && !session ? t("blockedTitle") : unhealthy ? t("noInternet") : t(PHASE_LABEL[phase]);
   const serverName = selected ? selected.name : t("noServerSelected");
   const powerLabel = live ? t("disconnect") : t("connect");
 
   return (
     <I18n.Provider value={t}>
-      <div className={`shell ${deckOpen ? "deck-open" : ""}`} data-phase={rayState}>
+      <div className="shell" ref={shell} data-phase={rayState} data-snap={snap}>
         <header className="titlebar" data-tauri-drag-region>
           <span className="mark" data-tauri-drag-region>
             <img src={logo} alt="" aria-hidden="true" data-tauri-drag-region />
@@ -521,7 +551,7 @@ export default function App() {
           </div>
         </header>
 
-        <main className="stage" onWheel={onStageWheel} {...inert(deckOpen)}>
+        <main className="stage" onWheel={onStageWheel} onClick={foldDeck} {...inert(snap === 2)}>
           {status.coreError ? (
             <div className="alert warn">
               {t("coreUnpackFailed")}
@@ -564,7 +594,8 @@ export default function App() {
               down={traffic?.downSpeed ?? 0}
               up={traffic?.upSpeed ?? 0}
               mirror={settings.language === "fa"}
-              paused={deckOpen || sheet === "settings" || sheet === "split" || sheet === "info" || sheet === "logs"}
+              paused={snap === 2 || sheet === "settings" || sheet === "split" || sheet === "info" || sheet === "logs"}
+              light={!dark}
             />
             <span className="field-end near">{t("thisPc")}</span>
             {live && session?.exit && (
@@ -578,6 +609,7 @@ export default function App() {
             </button>
           </div>
 
+          <div className="stage-low" {...inert(snap > 0)}>
           {status.blocked && !session && (
             <div className="alert danger">
               <span>{t("blockedBanner")}</span>
@@ -654,9 +686,10 @@ export default function App() {
               </button>
             </div>
           )}
+          </div>
         </main>
 
-        <div className="minibar" {...inert(!deckOpen)}>
+        <div className="minibar" onClick={foldDeck} {...inert(snap !== 2)}>
           <span className="mini-dot" aria-hidden="true" />
           <span className="mini-text">
             <strong>{word}</strong>
@@ -669,12 +702,13 @@ export default function App() {
         </div>
 
         <section className="deck" aria-label={t("servers")}>
-          <button className="deck-grip" onClick={() => setDeckOpen((o) => !o)} aria-expanded={deckOpen} aria-label={t("servers")}>
+          <div className="deck-top" onWheel={deck.onWheel} {...deck.dragProps}>
+          <button className="deck-grip" onClick={() => deckGo(snap === 1 ? 2 : 1)} aria-expanded={snap > 0} aria-label={t("servers")}>
             <span />
           </button>
 
           <div className="deck-head">
-            <div className="deck-peek" {...inert(deckOpen)}>
+            <div className="deck-peek" {...inert(snap > 0)}>
               {profiles.length === 0 ? (
                 <>
                   <span className="peek-text">
@@ -687,7 +721,7 @@ export default function App() {
                   </button>
                 </>
               ) : (
-                <button className="peek-open" onClick={() => setDeckOpen(true)}>
+                <button className="peek-open" onClick={() => deckGo(1)}>
                   {selected && <ProtocolBadge protocol={selected.protocol} />}
                   <span className="peek-text">
                     <strong>{serverName}</strong>
@@ -702,7 +736,7 @@ export default function App() {
               )}
             </div>
 
-            <div className="deck-bar" {...inert(!deckOpen)}>
+            <div className="deck-bar" {...inert(snap === 0)}>
               <h2>{t("servers")}</h2>
               <div className="deck-actions">
                 <button
@@ -725,7 +759,9 @@ export default function App() {
             </div>
           </div>
 
-          <div className="deck-body" {...inert(!deckOpen)}>
+          </div>
+
+          <div className="deck-body" {...inert(snap === 0)}>
             <div className="tabs" role="tablist" aria-label={t("servers")} ref={strip} onWheel={onTabsWheel}>
               <span className="tab-marker" ref={marker} aria-hidden="true" />
               {groups.map((g) => (
@@ -744,7 +780,7 @@ export default function App() {
               ))}
             </div>
 
-            <div className="deck-scroll" ref={deckScroll} onWheel={onDeckWheel} onScroll={() => (lastDeckScroll.current = Date.now())}>
+            <div className="deck-scroll" ref={deck.list} onWheel={deck.onListWheel} onScroll={deck.onListScroll}>
               {group && (
                 <div className="group-bar">
                   <div className="group-info">
@@ -912,11 +948,7 @@ export default function App() {
               }}
             >
               {logs.length ? (
-                logs.map((line, i) => (
-                  <div key={i} className={`log-line ${logTag(line)}`}>
-                    {line}
-                  </div>
-                ))
+                logLines
               ) : (
                 <div className="log-empty">{t("noLogs")}</div>
               )}

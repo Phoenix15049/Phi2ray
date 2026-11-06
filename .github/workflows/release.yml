@@ -7,6 +7,10 @@
 #
 # Nothing ships if a dependency audit fails or a downloaded core doesn't match
 # src-tauri/core/SHA256SUMS. Actions are pinned to exact commits (tag noted after each).
+#
+# Tagged releases are signed through SignPath once the repository has the variables
+# SIGNPATH_ORGANIZATION_ID, SIGNPATH_PROJECT_SLUG and SIGNPATH_POLICY_SLUG and the secret
+# SIGNPATH_API_TOKEN. Until then they're published unsigned. See CODE_SIGNING.md.
 name: Release
 
 on:
@@ -26,6 +30,7 @@ jobs:
   build:
     runs-on: windows-latest
     permissions:
+      actions: read # SignPath reads the unsigned artifact
       contents: write # draft release
       id-token: write # build attestation
       attestations: write
@@ -79,17 +84,57 @@ jobs:
           npm ci
           npm run build:exe
 
-      - name: Name and hash the exe
+      - name: Name the exe
         shell: pwsh
         run: |
           $version = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
           $name = "Phi2ray-$version-windows-x64.exe"
-          New-Item -ItemType Directory release | Out-Null
-          Copy-Item src-tauri/target/release/phi2ray.exe "release/$name"
-          $hash = (Get-FileHash "release/$name" -Algorithm SHA256).Hash.ToLower()
-          "$hash *$name" | Out-File release/SHA256SUMS.txt -Encoding ascii
+          New-Item -ItemType Directory unsigned, release | Out-Null
+          Copy-Item src-tauri/target/release/phi2ray.exe "unsigned/$name"
+          "APP_VERSION=$version" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
           "EXE_NAME=$name" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+      # Each signing request waits for manual approval on SignPath, so hand-started test builds
+      # stay unsigned.
+      - name: Upload the unsigned exe
+        id: unsigned
+        if: github.ref_type == 'tag' && vars.SIGNPATH_PROJECT_SLUG != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: phi2ray-unsigned
+          path: unsigned/
+
+      - name: Sign the exe
+        if: github.ref_type == 'tag' && vars.SIGNPATH_PROJECT_SLUG != ''
+        uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3.0
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_POLICY_SLUG }}
+          github-artifact-id: ${{ steps.unsigned.outputs.artifact-id }}
+          wait-for-completion: true
+          # Time to approve the request on SignPath.
+          wait-for-completion-timeout-in-seconds: 3600
+          output-artifact-directory: release
+          parameters: |
+            version: ${{ toJSON(env.APP_VERSION) }}
+
+      - name: Hash the exe
+        shell: pwsh
+        run: |
+          $exe = "release/$env:EXE_NAME"
+          $signed = Test-Path $exe
+          if ($signed) {
+            $signature = Get-AuthenticodeSignature $exe
+            if ($signature.Status -ne 'Valid') { throw "The signature isn't valid: $($signature.StatusMessage)" }
+          } else {
+            Copy-Item "unsigned/$env:EXE_NAME" $exe
+          }
+          $hash = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLower()
+          "$hash *$env:EXE_NAME" | Out-File release/SHA256SUMS.txt -Encoding ascii
           "EXE_SHA256=$hash" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "EXE_SIGNED=$($signed.ToString().ToLower())" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
 
       # Signed proof that this exe came from this repository, commit and workflow. GitHub offers
       # it for public repositories (private ones need GitHub Enterprise).
@@ -127,6 +172,10 @@ jobs:
           }
           $notes += @("Cores inside: Xray $env:XRAY_VERSION, sing-box $env:SING_BOX_VERSION", "", $fence)
           $notes += Get-Content src-tauri/core/SHA256SUMS
-          $notes += $fence
+          $notes += @($fence, "")
+          if ($env:EXE_SIGNED -eq 'true') {
+            $notes += @("Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org)", "")
+          }
+          $notes += "[Code signing policy](https://github.com/$env:GITHUB_REPOSITORY/blob/main/CODE_SIGNING.md) | [Privacy policy](https://github.com/$env:GITHUB_REPOSITORY/blob/main/PRIVACY.md)"
           $notes | Out-File notes.md -Encoding utf8
           gh release create $env:TAG release/* --draft --verify-tag --title "Phi2ray $env:TAG" --notes-file notes.md

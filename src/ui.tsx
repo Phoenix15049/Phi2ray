@@ -86,14 +86,57 @@ export const Icon = {
       </>,
       16,
     ),
-  lock: () =>
+  lock: (size = 12) =>
     svg(
       <>
         <rect x="5" y="11" width="14" height="10" rx="2" />
         <path d="M8 11V7a4 4 0 0 1 8 0v4" />
       </>,
-      12,
+      size,
     ),
+  palette: () =>
+    svg(
+      <>
+        <path d="M12 3a9 9 0 1 0 0 18c1.2 0 2-.8 2-1.8 0-1.2-1-1.6-1-2.7 0-1 .8-1.5 1.8-1.5H17a4 4 0 0 0 4-4c0-4.4-4-8-9-8z" />
+        <path d="M7.5 11.5h.01M10 7.5h.01M15 7.5h.01" />
+      </>,
+    ),
+  language: () => svg(<path d="M4 5h9M8.5 3v2M11 5c-.8 3.6-3 6.5-6 8M6 8.5c1 2 2.8 3.6 5 4.5M12.5 21l4-10 4 10M14 17.5h5" />),
+  moon: () => svg(<path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z" />),
+  pin: () => svg(<path d="M9 3h6l-1 6 3 3v2H7v-2l3-3zM12 14v7" />),
+  tray: () => svg(<path d="M4 14h4l2 3h4l2-3h4M4 14l3-9h10l3 9v5H4z" />),
+  play: () => svg(<path d="M8 5v14l11-7z" />),
+  route: () =>
+    svg(
+      <>
+        <circle cx="6" cy="18" r="2" />
+        <circle cx="18" cy="6" r="2" />
+        <path d="M8 18h7a3 3 0 0 0 0-6H9a3 3 0 0 1 0-6h7" />
+      </>,
+    ),
+  home: () => svg(<path d="M4 11l8-7 8 7M6 10v10h12V10" />),
+  flag: () => svg(<path d="M6 21V4M6 4h12l-3 4 3 4H6" />),
+  ban: () =>
+    svg(
+      <>
+        <circle cx="12" cy="12" r="9" />
+        <path d="m5.7 5.7 12.6 12.6" />
+      </>,
+    ),
+  noBolt: () => svg(<path d="M13 2 9.5 7M7 10.5 4 14h5M11 22l9-12h-5M3 3l18 18" />),
+  chip: () =>
+    svg(
+      <>
+        <rect x="7" y="7" width="10" height="10" rx="2" />
+        <path d="M10 3v4M14 3v4M10 17v4M14 17v4M3 10h4M3 14h4M17 10h4M17 14h4" />
+      </>,
+    ),
+  layers: () => svg(<path d="m12 3 9 5-9 5-9-5zM3 13l9 5 9-5" />),
+  ruler: () => svg(<path d="M4 16 16 4l4 4L8 20zM8 12l2 2M11 9l2 2M14 6l2 2" />),
+  hash: () => svg(<path d="M5 9h15M4 15h15M10 3 8 21M16 3l-2 18" />),
+  pulse: () => svg(<path d="M3 12h4l3-8 4 16 3-8h4" />),
+  list: () => svg(<path d="M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01" />),
+  link: () => svg(<path d="M10 14a4 4 0 0 0 6 .4l3-3a4 4 0 0 0-5.7-5.7l-1.4 1.4M14 10a4 4 0 0 0-6-.4l-3 3a4 4 0 0 0 5.7 5.7l1.4-1.4" />),
   down: () => svg(<path d="M12 4v15M6 13l6 6 6-6" />, 14),
   split: (size?: number) => svg(<path d="M4 12h6l4-6h6M14 18h6M10 12l4 6M17 3l3 3-3 3M17 15l3 3-3 3" />, size),
   alert: () => svg(<path d="M12 4 2.5 20h19zM12 10v4.5M12 17.5h.01" />, 12),
