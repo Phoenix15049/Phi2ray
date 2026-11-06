@@ -83,8 +83,9 @@ out of your way. It ships as one `.exe`, about 45 MB, with both cores inside.
   spinners.
 - **Connection info** (the ⓘ button) shows your exit IP and location as several databases see it,
   plus where the connection enters. If the entry and the exit are different servers, it tells you
-  the config goes through a relay or a CDN first. It only runs when you open it, and every lookup
-  goes through your server.
+  the config goes through a relay or a CDN first, and draws it on a world map. It also rates your
+  exit IP from 0 to 100, says if it's known as a VPN, proxy or Tor exit, and checks a few public
+  blocklists. It only runs when you open it, and every lookup goes through your server.
 
 **Day to day**
 
@@ -219,8 +220,8 @@ almost certainly have it already.
 
 There's no telemetry, no analytics and no update check. The only requests Phi2ray makes on its
 own are the connection check while you're connected and the subscription updates you added.
-Connection info asks ipapi.co, DB-IP, FreeIPAPI and Cloudflare (including where your server is),
-but only when you open it, and through your server.
+Connection info asks ipapi.co, DB-IP, FreeIPAPI, Cloudflare and proxycheck.io (including where
+your server is) and checks public blocklists, but only when you open it, and through your server.
 
 ## Building it yourself
 

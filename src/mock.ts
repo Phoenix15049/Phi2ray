@@ -214,11 +214,11 @@ const handlers: Record<string, (args: Record<string, any>) => unknown> = {
     await wait(1100);
     if (!session) throw "Not connected.";
     // Documentation-range IPs: an entry relay in one country, the exit in another.
-    const exit = { ip: "203.0.113.24", region: "Hesse", asn: "AS64500", org: "Example Hosting GmbH", proxy: null, error: null };
+    const exit = { ip: "203.0.113.24", region: "Hesse", asn: "AS64500", org: "Example Hosting GmbH", proxy: null, latitude: 50.05, longitude: 8.7, error: null };
     return {
       exit: [
         { ...exit, source: "ipapi.co", country: "DE", city: "Neu-Isenburg" },
-        { ...exit, source: "DB-IP", country: "DE", city: "Frankfurt am Main", asn: null, org: null },
+        { ...exit, source: "DB-IP", country: "DE", city: "Frankfurt am Main", asn: null, org: null, latitude: null, longitude: null },
         { ...exit, source: "FreeIPAPI", country: "DE", city: "Frankfurt am Main", proxy: false },
       ],
       trace: { ip: "203.0.113.24", country: "DE", colo: "FRA" },
@@ -227,9 +227,27 @@ const handlers: Record<string, (args: Record<string, any>) => unknown> = {
         ip: "198.51.100.7",
         public: true,
         geo: [
-          { source: "ipapi.co", ip: "198.51.100.7", country: "IR", region: "Tehran", city: "Tehran", asn: "AS64501", org: "Example Telecom", proxy: null, error: null },
-          { source: "FreeIPAPI", ip: null, country: null, region: null, city: null, asn: null, org: null, proxy: null, error: "Rate limited, try later" },
+          { source: "ipapi.co", ip: "198.51.100.7", country: "AE", region: "Dubai", city: "Dubai", asn: "AS64501", org: "Example Telecom", proxy: null, latitude: 25.2, longitude: 55.3, error: null },
+          { source: "FreeIPAPI", ip: null, country: null, region: null, city: null, asn: null, org: null, proxy: null, latitude: null, longitude: null, error: "Rate limited, try later" },
         ],
+      },
+      quality: {
+        score: 50,
+        vpn: true,
+        proxy: false,
+        tor: false,
+        hosting: true,
+        compromised: false,
+        network: "Hosting",
+        operator: null,
+        blocklists: [
+          { name: "Barracuda", listed: false },
+          { name: "blocklist.de", listed: false },
+          { name: "DroneBL", listed: false },
+          { name: "SpamCop", listed: true },
+          { name: "s5h", listed: null },
+        ],
+        error: null,
       },
       checkedAt: Date.now(),
     };

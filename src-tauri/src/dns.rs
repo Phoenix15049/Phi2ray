@@ -96,6 +96,37 @@ pub async fn resolve_bootstrap(name: &str, proxy: Option<&crate::probe::LocalPro
     first.ok().flatten().unwrap_or_default().into_iter().map(std::net::IpAddr::V4).collect()
 }
 
+/// Asks whether `name` (an address on a DNS blocklist, like `4.3.2.1.bl.example.org`) is listed.
+/// Goes through `client`, so through the server. None when the list gave no usable answer.
+pub async fn blocklisted(client: &reqwest::Client, name: &str) -> Option<bool> {
+    let query = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(query_packet(name));
+    let url = format!("{}?dns={query}", BOOTSTRAP_DOH[0]);
+    let resp = client.get(url).header("accept", "application/dns-message").send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    blocklist_answer(&resp.bytes().await.ok()?)
+}
+
+/// NXDOMAIN means not listed and a 127.x answer means listed. 127.255.x is how lists refuse
+/// public resolvers, which says nothing about the address.
+fn blocklist_answer(packet: &[u8]) -> Option<bool> {
+    if packet.len() < 12 || packet[2] & 0x80 == 0 {
+        return None;
+    }
+    match packet[3] & 0x0F {
+        3 => Some(false),
+        0 => {
+            let ips = a_records(packet);
+            if ips.iter().any(|ip| ip.octets()[1] == 255) {
+                return None;
+            }
+            Some(ips.iter().any(|ip| ip.octets()[0] == 127))
+        }
+        _ => None,
+    }
+}
+
 /// The IPv4 addresses (type A) in a DNS response; empty for errors or anything malformed.
 fn a_records(packet: &[u8]) -> Vec<std::net::Ipv4Addr> {
     let mut ips = Vec::new();
@@ -155,6 +186,24 @@ fn is_answer(packet: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn blocklist_answers() {
+        let header = |rcode: u8, answers: u8| vec![0, 0, 0x81, 0x80 | rcode, 0, 1, 0, answers, 0, 0, 0, 0];
+        let question = [1, b'a', 0, 0, 1, 0, 1];
+        let answer = |ip: [u8; 4]| {
+            let mut p = header(0, 1);
+            p.extend(question);
+            p.extend([0xC0, 12, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4]);
+            p.extend(ip);
+            p
+        };
+        assert_eq!(blocklist_answer(&header(3, 0)), Some(false));
+        assert_eq!(blocklist_answer(&answer([127, 0, 0, 2])), Some(true));
+        assert_eq!(blocklist_answer(&answer([127, 255, 255, 254])), None);
+        assert_eq!(blocklist_answer(&header(2, 0)), None);
+        assert_eq!(blocklist_answer(&[0; 4]), None);
+    }
 
     #[test]
     fn packet_shape() {

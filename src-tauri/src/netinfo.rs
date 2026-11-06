@@ -18,6 +18,14 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 /// These answers are a few hundred bytes; anything far bigger is not what we asked for.
 const MAX_BODY: usize = 64 * 1024;
 const TRACE_URL: &str = "https://www.cloudflare.com/cdn-cgi/trace";
+/// DNS blocklists that answer through public resolvers. Spamhaus, for one, refuses them.
+const BLOCKLISTS: [(&str, &str); 5] = [
+    ("Barracuda", "b.barracudacentral.org"),
+    ("blocklist.de", "bl.blocklist.de"),
+    ("DroneBL", "dnsbl.dronebl.org"),
+    ("SpamCop", "bl.spamcop.net"),
+    ("s5h", "all.s5h.net"),
+];
 
 #[derive(Clone, Copy)]
 enum Source {
@@ -65,7 +73,35 @@ pub struct Geo {
     pub org: Option<String>,
     /// Whether the database flags the IP as a proxy or VPN, when it says.
     pub proxy: Option<bool>,
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
     pub error: Option<String>,
+}
+
+/// How the exit IP looks to the rest of the internet.
+#[derive(Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Quality {
+    /// 0 to 100, higher is better: 100 minus proxycheck.io's risk rating.
+    pub score: Option<u8>,
+    pub vpn: bool,
+    pub proxy: bool,
+    pub tor: bool,
+    pub hosting: bool,
+    pub compromised: bool,
+    /// "Residential", "Business", "Wireless" or "Hosting".
+    pub network: Option<String>,
+    pub operator: Option<String>,
+    pub blocklists: Vec<Blocklist>,
+    pub error: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Blocklist {
+    pub name: &'static str,
+    /// None when the list gave no usable answer.
+    pub listed: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -94,6 +130,7 @@ pub struct Report {
     pub exit: Vec<Geo>,
     pub trace: Option<Trace>,
     pub entry: Option<Entry>,
+    pub quality: Option<Quality>,
     pub checked_at: u64,
 }
 
@@ -135,13 +172,71 @@ pub async fn lookup(target: InfoTarget) -> Result<Report, String> {
     if trace.is_none() && exit.iter().all(|g| g.ip.is_none()) {
         return Err("No answer through the server. Check the connection and try again.".into());
     }
+    let exit_ip = trace.as_ref().map(|t| t.ip.as_str()).or(exit.iter().find_map(|g| g.ip.as_deref())).and_then(|ip| ip.parse().ok());
+    let quality = match exit_ip {
+        Some(ip) => Some(quality(&client, ip).await),
+        None => None,
+    };
     let entry = target.server_ip.map(|ip| Entry {
         address: target.server_address,
         ip: ip.to_string(),
         public: is_public(ip),
         geo: entry_geo,
     });
-    Ok(Report { exit, trace, entry, checked_at: now_ms() })
+    Ok(Report { exit, trace, entry, quality, checked_at: now_ms() })
+}
+
+async fn quality(client: &reqwest::Client, ip: IpAddr) -> Quality {
+    let lists: Vec<_> = BLOCKLISTS
+        .iter()
+        .filter_map(|&(name, zone)| {
+            let query = reversed(ip)?;
+            let client = client.clone();
+            Some(tauri::async_runtime::spawn(async move {
+                Blocklist { name, listed: crate::dns::blocklisted(&client, &format!("{query}.{zone}")).await }
+            }))
+        })
+        .collect();
+    let mut quality = match get(client, &format!("https://proxycheck.io/v3/{ip}")).await {
+        Ok(body) => match serde_json::from_str::<Value>(&body) {
+            Ok(v) => parse_quality(&v, &ip.to_string()),
+            Err(_) => Quality { error: Some("Unexpected answer".into()), ..Quality::default() },
+        },
+        Err(e) => Quality { error: Some(e), ..Quality::default() },
+    };
+    for task in lists {
+        if let Ok(list) = task.await {
+            quality.blocklists.push(list);
+        }
+    }
+    quality
+}
+
+/// An IPv4 address the way DNS blocklists are asked: 1.2.3.4 becomes 4.3.2.1.
+fn reversed(ip: IpAddr) -> Option<String> {
+    let IpAddr::V4(v4) = ip else { return None };
+    let [a, b, c, d] = v4.octets();
+    Some(format!("{d}.{c}.{b}.{a}"))
+}
+
+fn parse_quality(v: &Value, ip: &str) -> Quality {
+    let entry = &v[ip];
+    let Some(risk) = entry["risk"].as_u64().filter(|r| *r <= 100) else {
+        return Quality { error: Some(text(v, "message").map_or("Unexpected answer".into(), |m| m.chars().take(80).collect())), ..Quality::default() };
+    };
+    let found = &entry["detections"];
+    let flag = |key: &str| found[key].as_bool() == Some(true);
+    Quality {
+        score: Some(100 - risk as u8),
+        vpn: flag("vpn"),
+        proxy: flag("proxy"),
+        tor: flag("tor"),
+        hosting: flag("hosting"),
+        compromised: flag("compromised"),
+        network: text(&entry["network"], "type"),
+        operator: text(&entry["operator"], "name"),
+        ..Quality::default()
+    }
 }
 
 async fn geo(client: &reqwest::Client, source: Source, ip: Option<IpAddr>) -> Geo {
@@ -192,6 +287,12 @@ fn text(v: &Value, key: &str) -> Option<String> {
     (!s.is_empty() && s.len() <= 120 && s != "-").then_some(s)
 }
 
+/// A coordinate, sent as a number or a string depending on the service.
+fn degrees(v: &Value, key: &str, limit: f64) -> Option<f64> {
+    let value = v[key].as_f64().or_else(|| v[key].as_str()?.trim().parse().ok())?;
+    (value.abs() <= limit).then_some(value)
+}
+
 fn country_code(v: &Value, key: &str) -> Option<String> {
     text(v, key).filter(|c| c.len() == 2 && c.chars().all(|ch| ch.is_ascii_alphabetic())).map(|c| c.to_uppercase())
 }
@@ -216,6 +317,8 @@ fn parse_geo(source: Source, v: &Value) -> Option<Geo> {
                 city: text(v, "city"),
                 asn: asn(text(v, "asn")),
                 org: text(v, "org"),
+                latitude: degrees(v, "latitude", 90.0),
+                longitude: degrees(v, "longitude", 180.0),
                 ..Geo::default()
             }
         }
@@ -234,6 +337,8 @@ fn parse_geo(source: Source, v: &Value) -> Option<Geo> {
             asn: asn(text(v, "asn")),
             org: text(v, "asnOrganization"),
             proxy: v["isProxy"].as_bool(),
+            latitude: degrees(v, "latitude", 90.0),
+            longitude: degrees(v, "longitude", 180.0),
             ..Geo::default()
         },
     };
@@ -303,6 +408,32 @@ mod tests {
         )
         .unwrap();
         assert_eq!((g.asn.as_deref(), g.proxy), (Some("AS58212"), Some(false)));
+    }
+
+    #[test]
+    fn reads_the_quality_answer() {
+        let v = json!({ "status": "ok", "2.59.135.114": {
+            "risk": 50,
+            "network": { "type": "Hosting" },
+            "detections": { "vpn": true, "proxy": false, "tor": false, "hosting": true, "compromised": false },
+            "operator": { "name": "IVPN" },
+        }});
+        let q = parse_quality(&v, "2.59.135.114");
+        assert_eq!((q.score, q.vpn, q.proxy, q.hosting), (Some(50), true, false, true));
+        assert_eq!((q.network.as_deref(), q.operator.as_deref()), (Some("Hosting"), Some("IVPN")));
+
+        let q = parse_quality(&json!({ "status": "denied", "message": "100 queries exhausted" }), "2.59.135.114");
+        assert_eq!((q.score, q.error.as_deref()), (None, Some("100 queries exhausted")));
+        assert_eq!(parse_quality(&json!({ "1.1.1.1": { "risk": 900 } }), "1.1.1.1").score, None);
+        assert_eq!(reversed("1.2.3.4".parse().unwrap()).as_deref(), Some("4.3.2.1"));
+        assert_eq!(reversed("2606:4700::1".parse().unwrap()), None);
+    }
+
+    #[test]
+    fn coordinates_are_checked() {
+        let v = json!({ "lat": "52.5", "lon": 13.4, "bad": 200 });
+        assert_eq!((degrees(&v, "lat", 90.0), degrees(&v, "lon", 180.0)), (Some(52.5), Some(13.4)));
+        assert_eq!(degrees(&v, "bad", 90.0), None);
     }
 
     #[test]

@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
-import { api, ConnectionInfo, Geo } from "./api";
+import { api, ConnectionInfo, Geo, Quality } from "./api";
 import { useT } from "./i18n";
+import { COUNTRIES, ZONES } from "./mapData";
 import { countryName, Icon, Sheet } from "./ui";
+import { MapPoint, WorldMap } from "./WorldMap";
 
 /** Providers whose IPs mean the connection enters through a CDN rather than a plain relay. */
 const CDN = /cloudflare|fastly|akamai|arvan|gcore|g-core|cdn77|bunny|cloudfront|edgecast|stackpath|imperva|incapsula/i;
@@ -23,6 +25,22 @@ function consensus(values: (string | null | undefined)[]) {
 function place(geo: Geo[], country: string | null) {
   const g = geo.find((x) => x.country === country && x.city) ?? geo.find((x) => x.country === country);
   return [g?.city, g?.region && g.region !== g.city ? g.region : null].filter(Boolean).join(", ");
+}
+
+/** A place for the map: the database's own coordinates, or else the country's. */
+function coordinates(geo: Geo[], country: string | null): [number, number] | null {
+  const exact = geo.find((g) => g.latitude !== null && g.longitude !== null && (!country || g.country === country));
+  if (exact) return [exact.latitude!, exact.longitude!];
+  return country ? (COUNTRIES[country] ?? null) : null;
+}
+
+/** A rough idea of where this PC is, from the time zone alone: nothing is looked up or sent. */
+function ownPlace(): [number, number] | null {
+  try {
+    return ZONES[Intl.DateTimeFormat().resolvedOptions().timeZone] ?? null;
+  } catch {
+    return null;
+  }
 }
 
 const pick = (geo: Geo[], key: "asn" | "org") => geo.find((g) => g[key])?.[key] ?? null;
@@ -79,6 +97,14 @@ export function InfoSheet(props: { connected: boolean; language: string; onClose
     }
     const hops = route === "cdn" || route === "relay";
 
+    const mark = (kind: MapPoint["kind"], label: string, at: [number, number] | null): MapPoint[] =>
+      at ? [{ kind, label, lat: at[0], lon: at[1] }] : [];
+    const points = [
+      ...mark("you", t("infoYou"), ownPlace()),
+      ...(entry?.public ? mark("entry", country(entryCountry), coordinates(entryGeo, entryCountry)) : []),
+      ...mark("exit", country(where.value), coordinates(geo, where.value)),
+    ];
+
     return (
       <>
         <div className="info-hero">
@@ -115,7 +141,8 @@ export function InfoSheet(props: { connected: boolean; language: string; onClose
 
         <h3>{t("infoRoute")}</h3>
         <div className={`route-card ${hops ? "hops" : route}`}>
-          <ol className="route-line">
+          {points.length > 0 && <WorldMap points={points} />}
+          <ol className="route-steps">
             <li>
               <span className="route-label">{t("infoYou")}</span>
             </li>
@@ -134,7 +161,10 @@ export function InfoSheet(props: { connected: boolean; language: string; onClose
             </li>
           </ol>
           <p className="route-verdict">{t(`route_${route}`)}</p>
+          {points.length > 0 && <p className="hint">{t("infoMapHint")}</p>}
         </div>
+
+        {info.quality && <QualityCard quality={info.quality} />}
 
         <dl className="facts info-facts">
           {entry && (
@@ -188,6 +218,76 @@ export function InfoSheet(props: { connected: boolean; language: string; onClose
     >
       {body()}
     </Sheet>
+  );
+}
+
+const FLAGS: [keyof Quality, string, boolean][] = [
+  ["vpn", "VPN", false],
+  ["hosting", "Hosting", false],
+  ["proxy", "Proxy", true],
+  ["tor", "Tor", true],
+  ["compromised", "Compromised", true],
+];
+
+function QualityCard({ quality: q }: { quality: Quality }) {
+  const t = useT();
+  const score = q.score;
+  const level = score === null ? null : score >= 75 ? "Clean" : score >= 50 ? "Vpn" : score >= 25 ? "Suspect" : "Flagged";
+  const color = level === "Clean" || level === "Vpn" ? "var(--ok)" : level === "Suspect" ? "var(--warn)" : "var(--bad)";
+  const answered = q.blocklists.filter((b) => b.listed !== null);
+  const listed = q.blocklists.filter((b) => b.listed).length;
+  return (
+    <>
+      <h3>{t("infoQuality")}</h3>
+      <div className="quality" style={{ "--gauge": color, "--score": score ?? 0 } as React.CSSProperties}>
+        {level ? (
+          <>
+            <div className="quality-top">
+              <div className="gauge">
+                <svg viewBox="0 0 100 100" aria-hidden="true">
+                  <circle className="gauge-track" cx="50" cy="50" r="42" pathLength="100" />
+                  <circle className="gauge-value" cx="50" cy="50" r="42" pathLength="100" />
+                </svg>
+                <strong className="ltr">{score}</strong>
+              </div>
+              <div className="quality-text">
+                <strong>{t(`quality${level}`)}</strong>
+                <span>{t(`quality${level}Hint`)}</span>
+                {(q.network || q.operator) && <span className="ltr">{[q.operator, q.network].filter(Boolean).join(" · ")}</span>}
+              </div>
+            </div>
+            <div className="quality-flags ltr">
+              {FLAGS.map(([key, label, serious]) => (
+                <span key={key} className={q[key] ? (serious ? "bad" : "on") : ""}>
+                  {label}
+                </span>
+              ))}
+            </div>
+          </>
+        ) : (
+          <p className="lead">
+            {t("qualityUnavailable")}
+            {q.error ? `: ${q.error}` : ""}
+          </p>
+        )}
+        {q.blocklists.length > 0 && (
+          <div className="blocklists">
+            <p className={`blocklists-title ${listed ? "listed" : ""}`}>
+              {listed ? t("blocklistsListed", { n: listed, m: answered.length }) : t("blocklistsClean")}
+            </p>
+            <ul>
+              {q.blocklists.map((b) => (
+                <li key={b.name} className={b.listed === null ? "" : b.listed ? "listed" : "clean"}>
+                  <span className="ltr">{b.name}</span>
+                  <i>{t(b.listed === null ? "listedUnknown" : b.listed ? "listedYes" : "listedNo")}</i>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </div>
+      {level && <p className="hint quality-note">{t("qualitySource")}</p>}
+    </>
   );
 }
 

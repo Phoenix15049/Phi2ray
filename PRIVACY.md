@@ -25,8 +25,12 @@ Phi2ray only contacts other systems for the things below.
   in its link avoids these lookups entirely.
 - **Cloudflare (`1.1.1.1/cdn-cgi/trace`).** Asked through your connection after connecting, to
   show your exit IP and country.
-- **Connection info: ipapi.co, DB-IP, FreeIPAPI and Cloudflare.** Only when you open that page.
-  They receive your exit IP and your server's IP, and every request goes through your server.
+- **Connection info: ipapi.co, DB-IP, FreeIPAPI, Cloudflare and proxycheck.io.** Only when you
+  open that page. They receive your exit IP and your server's IP, and every request goes through
+  your server. For the IP quality check, your exit IP is also looked up on public DNS blocklists
+  (Barracuda, blocklist.de, DroneBL, SpamCop and s5h) through Cloudflare's encrypted DNS.
+
+The map on that page places you from your Windows time zone. That stays on your PC.
 
 These services have their own privacy policies. Your server's operator can see the traffic you
 send through it, as with any VPN or proxy.

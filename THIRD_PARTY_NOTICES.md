@@ -16,5 +16,8 @@ The application itself is built with [Tauri](https://tauri.app) (MIT / Apache-2.
 [React](https://react.dev) (MIT) and the Rust and npm packages listed in `src-tauri/Cargo.lock`
 and `package-lock.json`, each under its own license.
 
+The world map comes from [Natural Earth](https://www.naturalearthdata.com) (public domain), and
+its place coordinates from the [tz database](https://www.iana.org/time-zones) (public domain).
+
 **Instrument Sans** and **Martian Mono** (the interface's fonts) are under the SIL Open Font
 License 1.1. Their license texts are in `src/assets/fonts/`.

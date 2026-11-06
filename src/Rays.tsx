@@ -6,8 +6,8 @@ export type RayState = "idle" | "connecting" | "connected" | "warning" | "discon
 const LENS = 0.5;
 
 type Rgb = [number, number, number];
-const DARK_INK = { down: [219, 194, 207], up: [111, 179, 194], warn: [233, 190, 120], cut: [232, 138, 138], spark: [255, 255, 255] } as Record<string, Rgb>;
-const LIGHT_INK = { down: [158, 86, 126], up: [44, 116, 134], warn: [186, 118, 24], cut: [192, 72, 80], spark: [255, 255, 255] } as Record<string, Rgb>;
+const DARK_INK = { down: [219, 194, 207], up: [111, 179, 194], warn: [233, 190, 120], cut: [232, 138, 138], ok: [143, 226, 193], spark: [255, 255, 255] } as Record<string, Rgb>;
+const LIGHT_INK = { down: [158, 86, 126], up: [44, 116, 134], warn: [186, 118, 24], cut: [192, 72, 80], ok: [24, 138, 108], spark: [255, 255, 255] } as Record<string, Rgb>;
 
 const mix = (a: Rgb, b: Rgb, t: number): Rgb => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
 const rgba = (c: Rgb, alpha: number) => `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${alpha})`;
@@ -60,6 +60,9 @@ export function Rays(props: { state: RayState; down: number; up: number; mirror:
     const pulses = [0, 1].map(() => Array.from({ length: 12 }, (_, i) => (i + Math.random() * 0.6) / 12));
     let time = Math.random() * 40;
     let phase = 0;
+    // Runs from 1 to 0 after connecting: the green wave leaving the lens.
+    let flash = 0;
+    let previous = live.current.state;
     let last = performance.now();
     let frame = 0;
     let tick = 0;
@@ -76,6 +79,10 @@ export function Rays(props: { state: RayState; down: number; up: number; mirror:
       }
       const dt = still.matches ? 1 : Math.min((at - last) / 1000, 0.05);
       last = at;
+
+      if (state === "connected" && previous !== "connected") flash = 1;
+      previous = state;
+      flash = Math.max(0, flash - dt / 1.5);
 
       const goal = TARGET[state];
       const ease = (from: number, to: number, rate: number) => from + (to - from) * (1 - Math.exp(-dt * rate));
@@ -129,6 +136,19 @@ export function Rays(props: { state: RayState; down: number; up: number; mirror:
       ctx.fillStyle = glow;
       ctx.fillRect(lensX - glowSize, cy - glowSize, glowSize * 2, glowSize * 2);
 
+      // Rings of green spreading from the lens, one after another.
+      if (flash > 0) {
+        for (let ring = 0; ring < 3; ring++) {
+          const age = 1 - flash - ring * 0.14;
+          if (age <= 0) continue;
+          ctx.strokeStyle = rgba(ink.ok, (light ? 0.55 : 0.5) * (1 - age) * (1 - age));
+          ctx.lineWidth = 2.2 - ring * 0.5;
+          ctx.beginPath();
+          ctx.arc(lensX, cy, 60 + age * w * 0.62, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+      }
+
       const drift = 0.5 * Math.sin(time * 0.31);
       const rays: { base: Rgb; offset: number; load: number; dir: number }[] = [
         // Download comes in from the far side; upload heads out.
@@ -137,7 +157,7 @@ export function Rays(props: { state: RayState; down: number; up: number; mirror:
       ];
 
       rays.forEach((ray, i) => {
-        const color = mix(mix(ray.base, ink.warn, now.warn * 0.85), ink.cut, now.cut * 0.9);
+        const color = mix(mix(mix(ray.base, ink.warn, now.warn * 0.85), ink.cut, now.cut * 0.9), ink.ok, flash * 0.9);
         const line = ctx.createLinearGradient(0, 0, w, 0);
         const nearAlpha = 0.28 + 0.62 * now.energy;
         const stop = (at: number, alpha: number) => line.addColorStop(Math.min(1, Math.max(0, at / w)), rgba(color, alpha));
@@ -225,6 +245,7 @@ export function Iris() {
       <circle className="iris-scale" r="60" pathLength="360" />
       <circle className="iris-arc" r="55" pathLength="100" />
       <circle className="iris-ping" r="48" />
+      <circle className="iris-ping second" r="48" />
       <circle className="iris-barrel" r="47.5" stroke="url(#iris-barrel)" />
       <g clipPath="url(#iris-clip)">
         <circle className="iris-well" r="45" />
@@ -237,6 +258,8 @@ export function Iris() {
         </g>
       </g>
       <circle className="iris-edge" r="45" />
+      <circle className="iris-seal" r="19" />
+      <path className="iris-check" pathLength="100" d="M-9 0.5 L-2.6 7 L9.5 -6.5" />
       <g className="iris-glyph">
         <path pathLength="100" d="M0 -15 V-2" />
         <path pathLength="100" d="M-9.2 -7.2 A13 13 0 1 0 9.2 -7.2" />

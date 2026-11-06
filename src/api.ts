@@ -126,6 +126,24 @@ export type Geo = {
   asn: string | null;
   org: string | null;
   proxy: boolean | null;
+  latitude: number | null;
+  longitude: number | null;
+  error: string | null;
+};
+
+/** How the exit IP looks to the rest of the internet. */
+export type Quality = {
+  /** 0 to 100, higher is better. */
+  score: number | null;
+  vpn: boolean;
+  proxy: boolean;
+  tor: boolean;
+  hosting: boolean;
+  compromised: boolean;
+  network: string | null;
+  operator: string | null;
+  /** `listed` is null when the list gave no usable answer. */
+  blocklists: { name: string; listed: boolean | null }[];
   error: string | null;
 };
 
@@ -135,6 +153,7 @@ export type ConnectionInfo = {
   trace: { ip: string; country: string | null; colo: string | null } | null;
   /** Where the connection enters: the server address xray dials. */
   entry: { address: string; ip: string; public: boolean; geo: Geo[] } | null;
+  quality: Quality | null;
   checkedAt: number;
 };
 

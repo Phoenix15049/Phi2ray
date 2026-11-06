@@ -12,8 +12,8 @@ const WHEEL_IDLE = 130;
 /** A list scroll this recent keeps the wheel on the list, so a fling doesn't move the deck too. */
 const LIST_HOLD = 260;
 /** Spring, tuned to settle quickly with no bounce. */
-const STIFFNESS = 210;
-const DAMPING = 29;
+const STIFFNESS = 400;
+const DAMPING = 40;
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 
