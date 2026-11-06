@@ -190,6 +190,9 @@ export const api = {
   pingDns: (servers: string[]) => backend.call<(number | null)[]>("ping_dns", { servers }),
   quitApp: () => backend.call<void>("quit_app"),
   hideWindow: () => backend.call<void>("hide_window"),
+  minimizeWindow: () => backend.call<void>("minimize_window"),
+  /** Like the title bar's close button: asks first while connected. */
+  closeWindow: () => backend.call<void>("close_window"),
   /** Only the app's own fixed links ("github", "site"). */
   openLink: (name: "github" | "site") => backend.call<void>("open_link", { name }),
 };

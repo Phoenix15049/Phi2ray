@@ -1,7 +1,7 @@
-import { ReactNode, useEffect, useState } from "react";
+import { ReactNode, useEffect, useRef, useState } from "react";
 import { About, api, Mode, Settings, Status } from "./api";
 import { StringKey, T, useT } from "./i18n";
-import { Icon, Segmented, Sheet, Switch } from "./ui";
+import { Icon, revealInStrip, Segmented, Sheet, Switch, useSlidingMarker } from "./ui";
 
 export const modeOptions = (t: T): { id: Mode; label: string; hint: string }[] => [
   { id: "tun", label: t("modeVpn"), hint: t("modeVpnHint") },
@@ -32,6 +32,7 @@ type Props = {
   about: About | null;
   busy: boolean;
   needsReconnect: boolean;
+  covered: boolean;
   onChange: (patch: Partial<Settings>) => void;
   onModeChange: (mode: Mode) => void;
   onReconnect: () => void;
@@ -39,11 +40,73 @@ type Props = {
   onClose: () => void;
 };
 
+const SECTIONS: StringKey[] = [
+  "appearance",
+  "connection",
+  "protection",
+  "splitTunnel",
+  "routing",
+  "dns",
+  "vpnAdapter",
+  "localProxy",
+  "diagnostics",
+  "consoleSection",
+  "about",
+];
+
+/** A strip of section names: shows where you are in the long page, and jumps there on a click. */
+function SectionNav() {
+  const t = useT();
+  const [current, setCurrent] = useState<StringKey>(SECTIONS[0]);
+  const jumped = useRef(0);
+  const { strip, marker } = useSlidingMarker(current, [t]);
+
+  useEffect(() => {
+    const body = strip.current?.parentElement?.querySelector<HTMLElement>(".page-body");
+    if (!body) return;
+    const onScroll = () => {
+      if (Date.now() - jumped.current < 500) return;
+      const line = body.getBoundingClientRect().top + 72;
+      let found = SECTIONS[0];
+      for (const key of SECTIONS) {
+        const section = body.querySelector(`[data-section="${key}"]`);
+        if (section && section.getBoundingClientRect().top <= line) found = key;
+      }
+      if (body.scrollTop + body.clientHeight >= body.scrollHeight - 2) found = SECTIONS[SECTIONS.length - 1];
+      setCurrent(found);
+    };
+    body.addEventListener("scroll", onScroll, { passive: true });
+    return () => body.removeEventListener("scroll", onScroll);
+  }, [strip]);
+
+  useEffect(() => {
+    revealInStrip(strip.current, strip.current?.querySelector(`[data-key="${current}"]`));
+  }, [current, strip]);
+
+  const jump = (key: StringKey) => {
+    jumped.current = Date.now();
+    setCurrent(key);
+    const body = strip.current?.parentElement?.querySelector(".page-body");
+    body?.querySelector(`[data-section="${key}"]`)?.scrollIntoView({ block: "start", behavior: "smooth" });
+  };
+
+  return (
+    <nav className="section-nav tabs" ref={strip} aria-label={t("settings")}>
+      <span className="tab-marker" ref={marker} aria-hidden="true" />
+      {SECTIONS.map((key) => (
+        <button key={key} data-key={key} className={`tab ${key === current ? "active" : ""}`} onClick={() => jump(key)}>
+          {t(key)}
+        </button>
+      ))}
+    </nav>
+  );
+}
+
 export function SettingsSheet(p: Props) {
   const t = useT();
   const s = p.settings;
   return (
-    <Sheet title={t("settings")} onClose={p.onClose}>
+    <Sheet title={t("settings")} onClose={p.onClose} covered={p.covered} subhead={<SectionNav />}>
       {p.needsReconnect && (
         <div className="reconnect-bar">
           <span>{t("reconnectToApply")}</span>
@@ -53,7 +116,7 @@ export function SettingsSheet(p: Props) {
         </div>
       )}
 
-      <Section title={t("appearance")}>
+      <Section id="appearance">
         <Group>
           <Row title={t("language")}>
             <Segmented
@@ -87,7 +150,7 @@ export function SettingsSheet(p: Props) {
         </Group>
       </Section>
 
-      <Section title={t("connection")}>
+      <Section id="connection">
         <div className="choices">
           {modeOptions(t).map((m) => (
             <button
@@ -115,7 +178,7 @@ export function SettingsSheet(p: Props) {
         </Group>
       </Section>
 
-      <Section title={t("protection")}>
+      <Section id="protection">
         <Group>
           <Row title={t("killSwitch")} hint={t("killSwitchHint")}>
             <Switch checked={s.killSwitch} onChange={(v) => p.onChange({ killSwitch: v })} label={t("killSwitch")} />
@@ -126,7 +189,7 @@ export function SettingsSheet(p: Props) {
         </Group>
       </Section>
 
-      <Section title={t("splitTunnel")}>
+      <Section id="splitTunnel">
         <button className="nav-row" onClick={p.onOpenSplit}>
           <span className="choice-icon">{Icon.split()}</span>
           <span className="row-text">
@@ -141,7 +204,7 @@ export function SettingsSheet(p: Props) {
         </button>
       </Section>
 
-      <Section title={t("routing")}>
+      <Section id="routing">
         <Group>
           <Row title={t("bypassLan")} hint={t("bypassLanHint")}>
             <Switch checked={s.bypassLan} onChange={(v) => p.onChange({ bypassLan: v })} label={t("bypassLan")} />
@@ -158,7 +221,7 @@ export function SettingsSheet(p: Props) {
         </Group>
       </Section>
 
-      <Section title={t("dns")} hint={t("dnsHint")}>
+      <Section id="dns" hint={t("dnsHint")}>
         <DnsPicker value={s.remoteDns} connected={!!p.status.session} onCommit={(remoteDns) => p.onChange({ remoteDns })} />
         <Group>
           <Row title={t("ipv6")} hint={t("ipv6Hint")}>
@@ -167,7 +230,7 @@ export function SettingsSheet(p: Props) {
         </Group>
       </Section>
 
-      <Section title={t("vpnAdapter")}>
+      <Section id="vpnAdapter">
         <Group>
           <Row title={t("networkStack")} hint={t("networkStackHint")}>
             <select className="select" value={s.tunStack} onChange={(e) => p.onChange({ tunStack: e.target.value as Settings["tunStack"] })}>
@@ -185,7 +248,7 @@ export function SettingsSheet(p: Props) {
         </Group>
       </Section>
 
-      <Section title={t("localProxy")} hint={t("localProxyHint")}>
+      <Section id="localProxy" hint={t("localProxyHint")}>
         <Group>
           <Row title={t("fixedPorts")} hint={t("fixedPortsHint")}>
             <Switch checked={s.fixedPorts} onChange={(v) => p.onChange({ fixedPorts: v })} label={t("fixedPorts")} />
@@ -203,7 +266,7 @@ export function SettingsSheet(p: Props) {
         </Group>
       </Section>
 
-      <Section title={t("diagnostics")}>
+      <Section id="diagnostics">
         <Group>
           <Row title={t("logLevel")} hint={t("logLevelHint")}>
             <select className="select" value={s.logLevel} onChange={(e) => p.onChange({ logLevel: e.target.value as Settings["logLevel"] })}>
@@ -218,7 +281,7 @@ export function SettingsSheet(p: Props) {
         </Group>
       </Section>
 
-      <Section title={t("consoleSection")}>
+      <Section id="consoleSection">
         <Group>
           <Row title={t("consoleCommand")} hint={t("consoleCommandHint")}>
             <Switch checked={s.console} onChange={(v) => p.onChange({ console: v })} label={t("consoleCommand")} />
@@ -231,7 +294,7 @@ export function SettingsSheet(p: Props) {
         )}
       </Section>
 
-      <Section title={t("about")}>
+      <Section id="about">
         <dl className="facts">
           <dt>Phi2ray</dt>
           <dd className="ltr">{p.about?.app ?? "…"}</dd>
@@ -343,10 +406,11 @@ function DnsPicker(props: { value: string; connected: boolean; onCommit: (v: str
   );
 }
 
-function Section(props: { title: string; hint?: string; children: ReactNode }) {
+function Section(props: { id: StringKey; hint?: string; children: ReactNode }) {
+  const t = useT();
   return (
-    <section className="settings-section">
-      <h3>{props.title}</h3>
+    <section className="settings-section" data-section={props.id}>
+      <h3>{t(props.id)}</h3>
       {props.hint && <p className="section-hint">{props.hint}</p>}
       {props.children}
     </section>

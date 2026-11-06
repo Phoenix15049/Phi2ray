@@ -61,15 +61,15 @@ let settings: Settings = {
     : DEFAULT_SETTINGS.split,
 };
 let session: Session | null =
-  params.get("demo") === "connected"
+  params.get("demo") === "connected" || params.get("demo") === "reconnecting" || params.get("demo") === "nointernet"
     ? {
         profileId: profiles[0].id,
         mode: "tun",
         socksPort: 49731,
         httpPort: 50212,
         startedAt: Date.now() - 754_000,
-        state: "connected",
-        health: { ok: true, ms: 184, checkedAt: Date.now() },
+        state: params.get("demo") === "reconnecting" ? "reconnecting" : "connected",
+        health: { ok: params.get("demo") !== "nointernet", ms: params.get("demo") === "nointernet" ? null : 184, checkedAt: Date.now() },
         exit: { ip: "203.0.113.24", country: "DE" },
         reconnects: 0,
         killSwitch: true,
@@ -78,7 +78,8 @@ let session: Session | null =
     : null;
 const logs: string[] = [];
 
-const mockStatus = () => ({ session, firewall: !!session?.killSwitch, blocked: false, xrayFound: true, tunFound: true, elevated: true, coreError: null });
+const blocked = params.get("demo") === "blocked";
+const mockStatus = () => ({ session, firewall: !!session?.killSwitch || blocked, blocked: blocked && !session, xrayFound: true, tunFound: true, elevated: true, coreError: null });
 
 const handlers: Record<string, (args: Record<string, any>) => unknown> = {
   get_state: () => ({ groups, profiles, settings }),
@@ -196,6 +197,8 @@ const handlers: Record<string, (args: Record<string, any>) => unknown> = {
     location.reload();
   },
   hide_window: () => {},
+  minimize_window: () => {},
+  close_window: () => emit("close-requested", null),
   open_link: () => {},
   socks_url: () => {
     if (!session) throw "Not connected.";
@@ -245,7 +248,7 @@ const handlers: Record<string, (args: Record<string, any>) => unknown> = {
     );
   },
   about: () => ({
-    app: "0.1.0",
+    app: "0.1.2",
     xray: "26.10.21",
     singBox: "1.14.4",
     coreDir: "C:\\Phi2ray\\core",

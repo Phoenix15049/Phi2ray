@@ -91,11 +91,14 @@ out of your way. It ships as one `.exe`, about 45 MB, with both cores inside.
 - **Split tunnel.** Let some apps or sites skip the VPN (your bank, a game, a local site), or flip
   it so only the ones you choose use it. You can pick apps straight from what's running. A small
   icon next to the kill switch lock shows when it's on.
-- Live download and upload speed, and how much you've used this session.
+- The two rays on the main screen are your download and upload. They pass through a lens that
+  only opens while you're connected, and their weight, pace and pulses follow your real traffic.
+  Live speeds and how much you've used this session sit right below them.
 - Sits in the tray. Minimizing hides it there, and if you close it while connected, it asks first.
   A dot on the tray icon tells you the state at a glance: blue when connected, orange while
   reconnecting, red when the kill switch is holding the internet blocked, none when off.
-- Dark and light themes, and a full Persian interface.
+- Dark and light themes, and a full Persian interface. Scroll down (or click the bar at the
+  bottom) to bring up your servers; the connection stays in reach at the top.
 
 **From the terminal**
 

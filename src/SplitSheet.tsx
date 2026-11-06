@@ -38,15 +38,7 @@ export function SplitSheet(props: {
   const appsNeedVpn = s.enabled && s.apps.length > 0 && props.connectionMode !== "tun";
 
   return (
-    <Sheet
-      title={t("splitTunnel")}
-      onClose={props.onBack}
-      actions={
-        <button className="btn small" onClick={props.onBack}>
-          {t("settings")}
-        </button>
-      }
-    >
+    <Sheet title={t("splitTunnel")} onClose={props.onBack}>
       <div className="group">
         <div className="row-setting">
           <div className="row-text">

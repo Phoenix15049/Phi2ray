@@ -1,4 +1,4 @@
-import { ReactNode, useEffect } from "react";
+import { createContext, ReactNode, useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { Profile } from "./api";
 import { T, useT } from "./i18n";
 
@@ -12,7 +12,7 @@ const svg = (children: ReactNode, size = 18) => (
     height={size}
     fill="none"
     stroke="currentColor"
-    strokeWidth="2"
+    strokeWidth="1.7"
     strokeLinecap="round"
     strokeLinejoin="round"
     aria-hidden="true"
@@ -105,6 +105,10 @@ export const Icon = {
       </>,
     ),
   chevron: () => svg(<path d="m9 6 6 6-6 6" />, 16),
+  chevronUp: () => svg(<path d="m6 15 6-6 6 6" />, 16),
+  back: () => svg(<path d="M19 12H5M11 6l-6 6 6 6" />),
+  minimize: () => svg(<path d="M6 12h12" />, 14),
+  windowClose: () => svg(<path d="M7 7l10 10M17 7 7 17" />, 14),
   up: () => svg(<path d="M12 20V5M6 11l6-6 6 6" />, 14),
   server: () =>
     svg(
@@ -117,27 +121,72 @@ export const Icon = {
     ),
 };
 
-export function Sheet(props: { title: string; onClose: () => void; children: ReactNode; actions?: ReactNode }) {
-  const t = useT();
+/** How long a closing page or dialog stays on screen; matches the exit animations in styles.css. */
+const EXIT_MS = 240;
+
+const Closing = createContext(false);
+
+/** Keeps its children on screen while they animate out. */
+export function Presence({ show, children }: { show: boolean; children: ReactNode }) {
+  const [mounted, setMounted] = useState(show);
   useEffect(() => {
+    if (show) return setMounted(true);
+    const timer = setTimeout(() => setMounted(false), EXIT_MS);
+    return () => clearTimeout(timer);
+  }, [show]);
+  if (!show && !mounted) return null;
+  return <Closing.Provider value={!show}>{children}</Closing.Provider>;
+}
+
+/** A full page sliding over the stage, or (`dialog`) a small card for one quick decision. */
+export function Sheet(props: {
+  title: string;
+  onClose: () => void;
+  children: ReactNode;
+  actions?: ReactNode;
+  dialog?: boolean;
+  /** Another page lies on top of this one, so Escape belongs to that one. */
+  covered?: boolean;
+  /** Stays under the header, for page-wide navigation. */
+  subhead?: ReactNode;
+}) {
+  const t = useT();
+  const closing = useContext(Closing);
+  useEffect(() => {
+    if (props.covered) return;
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && props.onClose();
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [props.onClose]);
+  }, [props.onClose, props.covered]);
 
-  return (
-    <div className="overlay" onClick={props.onClose}>
-      <div className="sheet" role="dialog" aria-label={props.title} onClick={(e) => e.stopPropagation()}>
-        <div className="sheet-grip" aria-hidden="true" />
-        <div className="sheet-head">
-          <h2>{props.title}</h2>
-          {props.actions}
-          <button className="icon-btn" onClick={props.onClose} aria-label={t("cancel")}>
-            {Icon.close()}
-          </button>
+  const state = closing ? "closing" : "open";
+  if (props.dialog) {
+    return (
+      <div className="scrim" data-state={state} onClick={props.onClose}>
+        <div className="dialog" role="dialog" aria-modal="true" aria-label={props.title} onClick={(e) => e.stopPropagation()}>
+          <div className="dialog-head">
+            <h2>{props.title}</h2>
+            {props.actions}
+            <button className="icon-btn" onClick={props.onClose} aria-label={t("cancel")}>
+              {Icon.close()}
+            </button>
+          </div>
+          <div className="dialog-body">{props.children}</div>
         </div>
-        <div className="sheet-body">{props.children}</div>
       </div>
+    );
+  }
+  return (
+    <div className={`page ${props.covered ? "covered" : ""}`} data-state={state} role="dialog" aria-label={props.title}>
+      <div className="page-head">
+        <button className="icon-btn flip" onClick={props.onClose} aria-label={t("back")} title={t("back")}>
+          {Icon.back()}
+        </button>
+        <h2>{props.title}</h2>
+        {props.actions}
+      </div>
+      {props.subhead}
+      <div className="page-body">{props.children}</div>
     </div>
   );
 }
@@ -156,7 +205,7 @@ export function Switch(props: { checked: boolean; onChange: (v: boolean) => void
   );
 }
 
-/** A compact segmented control. */
+/** A compact segmented control; the thumb slides to the chosen option. */
 export function Segmented<V extends string>(props: {
   value: V;
   options: { value: V; label: string; title?: string }[];
@@ -165,8 +214,11 @@ export function Segmented<V extends string>(props: {
   label: string;
   className?: string;
 }) {
+  const index = props.options.findIndex((o) => o.value === props.value);
+  const vars = { "--n": props.options.length, "--i": Math.max(0, index) } as React.CSSProperties;
   return (
-    <div className={`segmented ${props.className ?? ""}`} role="radiogroup" aria-label={props.label}>
+    <div className={`segmented ${props.className ?? ""}`} role="radiogroup" aria-label={props.label} style={vars}>
+      <span className="segmented-thumb" aria-hidden="true" />
       {props.options.map((o) => (
         <button
           key={o.value}
@@ -184,10 +236,44 @@ export function Segmented<V extends string>(props: {
   );
 }
 
+/** Scrolls a strip sideways to an item, without moving anything around it. */
+export function revealInStrip(strip: HTMLElement | null, item: Element | null | undefined) {
+  if (!strip || !(item instanceof HTMLElement)) return;
+  strip.scrollTo({ left: item.offsetLeft - (strip.clientWidth - item.offsetWidth) / 2, behavior: "smooth" });
+}
+
+/** Keeps a sliding marker under the active child of a scrolling strip. */
+export function useSlidingMarker(active: string, deps: unknown[]) {
+  const strip = useRef<HTMLDivElement>(null);
+  const marker = useRef<HTMLSpanElement>(null);
+  useLayoutEffect(() => {
+    const place = () => {
+      const el = strip.current?.querySelector<HTMLElement>(`[data-key="${CSS.escape(active)}"]`);
+      if (!el || !marker.current) return;
+      marker.current.style.width = `${el.offsetWidth}px`;
+      marker.current.style.transform = `translateX(${el.offsetLeft}px)`;
+    };
+    place();
+    const resize = new ResizeObserver(place);
+    if (strip.current) resize.observe(strip.current);
+    document.fonts?.ready.then(place);
+    return () => resize.disconnect();
+  }, [active, ...deps]);
+  return { strip, marker };
+}
+
 export function Latency({ value }: { value: Delay }) {
   const t = useT();
   if (value === undefined) return null;
-  if (value === "testing") return <span className="latency testing">···</span>;
+  if (value === "testing") {
+    return (
+      <span className="latency testing" aria-label={t("testing")}>
+        <i />
+        <i />
+        <i />
+      </span>
+    );
+  }
   if (value === null) return <span className="latency bad">{t("failed")}</span>;
   const level = value < 400 ? "good" : value < 1000 ? "mid" : "slow";
   const bars = value < 400 ? 3 : value < 1000 ? 2 : 1;
@@ -200,6 +286,23 @@ export function Latency({ value }: { value: Delay }) {
       </span>
       <span className="ltr">{value} ms</span>
     </span>
+  );
+}
+
+/** The last readings of a value, as a small line. */
+export function Spark({ value, active }: { value: number; active: boolean }) {
+  const [points, setPoints] = useState<number[]>([]);
+  useEffect(() => {
+    if (!active) return setPoints([]);
+    setPoints((p) => [...p.slice(-31), value]);
+  }, [value, active]);
+  if (points.length < 2) return <svg className="spark" viewBox="0 0 100 24" preserveAspectRatio="none" aria-hidden="true" />;
+  const peak = Math.max(...points, 1);
+  const line = points.map((v, i) => `${100 - (points.length - 1 - i) * (100 / 31)},${22 - (v / peak) * 20}`).join(" ");
+  return (
+    <svg className="spark" viewBox="0 0 100 24" preserveAspectRatio="none" aria-hidden="true">
+      <polyline points={line} vectorEffect="non-scaling-stroke" />
+    </svg>
   );
 }
 

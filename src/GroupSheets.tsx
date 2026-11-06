@@ -55,7 +55,7 @@ export function AddSheet(props: {
   const canSubmit = !working && (kind === "links" ? links.trim() : kind === "subscription" ? url.trim() : name.trim());
 
   return (
-    <Sheet title={t("addTitle")} onClose={props.onClose}>
+    <Sheet dialog title={t("addTitle")} onClose={props.onClose}>
       <Segmented
         className="wide"
         label={t("addTitle")}
@@ -160,7 +160,7 @@ export function GroupSheet(props: {
   };
 
   return (
-    <Sheet title={sub ? t("subscription") : t("group")} onClose={props.onClose}>
+    <Sheet dialog title={sub ? t("subscription") : t("group")} onClose={props.onClose}>
       <label className="stack-field">
         <span>{t("name")}</span>
         <input className="input full" value={name} maxLength={60} onChange={(e) => setName(e.target.value)} />

@@ -115,35 +115,24 @@ export function InfoSheet(props: { connected: boolean; language: string; onClose
 
         <h3>{t("infoRoute")}</h3>
         <div className={`route-card ${hops ? "hops" : route}`}>
-          <div className="route-path">
-            <div className="route-node">
+          <ol className="route-line">
+            <li>
               <span className="route-label">{t("infoYou")}</span>
-            </div>
-            <span className="route-arrow" aria-hidden="true">
-              {Icon.chevron()}
-            </span>
-            <div className="route-node">
+            </li>
+            <li>
               <span className="route-label">{t("infoEntry")}</span>
               <span className="route-value">{entry ? (entry.public ? country(entryCountry) : t("infoPrivate")) : "—"}</span>
-            </div>
+            </li>
             {hops && (
-              <>
-                <span className="route-arrow dashed" aria-hidden="true">
-                  {Icon.chevron()}
-                </span>
-                <div className="route-node">
-                  <span className="route-label">{t("infoExit")}</span>
-                  <span className="route-value">{country(where.value)}</span>
-                </div>
-              </>
+              <li className="relay">
+                <span className="route-label">{t("infoExit")}</span>
+                <span className="route-value">{country(where.value)}</span>
+              </li>
             )}
-            <span className="route-arrow" aria-hidden="true">
-              {Icon.chevron()}
-            </span>
-            <div className="route-node">
+            <li>
               <span className="route-label">{t("infoInternet")}</span>
-            </div>
-          </div>
+            </li>
+          </ol>
           <p className="route-verdict">{t(`route_${route}`)}</p>
         </div>
 
@@ -189,7 +178,7 @@ export function InfoSheet(props: { connected: boolean; language: string; onClose
       onClose={props.onClose}
       actions={
         props.connected && (
-          <div className="sheet-head-actions">
+          <div className="head-actions">
             <button className={`icon-btn ${loading ? "spinning" : ""}`} onClick={load} disabled={loading} aria-label={t("checkAgain")} title={t("checkAgain")}>
               {Icon.refresh()}
             </button>

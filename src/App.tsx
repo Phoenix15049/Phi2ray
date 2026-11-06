@@ -5,6 +5,7 @@ import { DEFAULT_SETTINGS } from "./defaults";
 import { AddKind, AddSheet, GroupSheet, looksLikeSubscription } from "./GroupSheets";
 import { I18n, makeT, StringKey } from "./i18n";
 import { InfoSheet } from "./InfoSheet";
+import { Iris, Rays, RayState } from "./Rays";
 import { modeOptions, SettingsSheet } from "./SettingsSheet";
 import { SplitSheet } from "./SplitSheet";
 import {
@@ -15,10 +16,14 @@ import {
   formatSpeed,
   Icon,
   Latency,
+  Presence,
   ProtocolBadge,
+  revealInStrip,
   Segmented,
   Sheet,
+  Spark,
   timeAgo,
+  useSlidingMarker,
 } from "./ui";
 
 type Phase = "idle" | "connecting" | "connected" | "reconnecting" | "disconnecting";
@@ -47,6 +52,12 @@ const LIVE_SETTINGS: (keyof Settings)[] = [
   "minimizeToTray",
 ];
 
+/** `inert` takes hidden parts of the stage and deck out of the tab order. */
+const inert = (on: boolean) => (on ? ({ inert: "" } as object) : {});
+
+/** The part of the app a log line came from, for its colour. */
+const logTag = (line: string) => (line.startsWith("[app]") ? "app" : line.startsWith("[console]") ? "app" : line.startsWith("[tun]") ? "tun" : line.startsWith("[xray]") ? "xray" : "");
+
 const EMPTY_STATUS: Status = {
   session: null,
   firewall: false,
@@ -71,6 +82,7 @@ export default function App() {
   const [query, setQuery] = useState("");
   const [sortByDelay, setSortByDelay] = useState(false);
   const [sheet, setSheet] = useState<SheetName>(null);
+  const [deckOpen, setDeckOpen] = useState(false);
   const [addPreset, setAddPreset] = useState<{ kind: AddKind; text: string }>({ kind: "links", text: "" });
   const [logs, setLogs] = useState<string[]>([]);
   const [about, setAbout] = useState<About | null>(null);
@@ -79,8 +91,10 @@ export default function App() {
   const pendingRef = useRef(pending);
   pendingRef.current = pending;
   const hadSession = useRef(false);
-  const logEnd = useRef<HTMLDivElement>(null);
-  const tabsRef = useRef<HTMLDivElement>(null);
+  const logBox = useRef<HTMLDivElement>(null);
+  const logFollow = useRef(true);
+  const deckScroll = useRef<HTMLDivElement>(null);
+  const lastDeckScroll = useRef(0);
 
   const t = useMemo(() => makeT(settings.language), [settings.language]);
   const tRef = useRef(t);
@@ -214,8 +228,10 @@ export default function App() {
     return () => clearInterval(timer);
   }, [sheet]);
 
+  // Follows new lines, unless the user scrolled up to read.
   useEffect(() => {
-    if (sheet === "logs") logEnd.current?.scrollIntoView();
+    const box = logBox.current;
+    if (sheet === "logs" && box && logFollow.current) box.scrollTop = box.scrollHeight;
   }, [logs, sheet]);
 
   useEffect(() => {
@@ -227,10 +243,26 @@ export default function App() {
     if (groups.length && !groups.some((g) => g.id === activeGroup)) setActiveGroup(DEFAULT_GROUP);
   }, [groups, activeGroup]);
 
+  const counts = useMemo(() => {
+    const c: Record<string, number> = {};
+    for (const p of profiles) c[p.groupId] = (c[p.groupId] ?? 0) + 1;
+    return c;
+  }, [profiles]);
+
+  const { strip, marker } = useSlidingMarker(activeGroup, [groups, counts, settings.language]);
+
   // Keep the active tab in view.
   useEffect(() => {
-    tabsRef.current?.querySelector(".tab.active")?.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "smooth" });
-  }, [activeGroup, groups.length]);
+    revealInStrip(strip.current, strip.current?.querySelector(".tab.active"));
+  }, [activeGroup, groups.length, strip]);
+
+  // Escape folds the deck away (a page or dialog on top takes it first).
+  useEffect(() => {
+    if (!deckOpen || sheet) return;
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setDeckOpen(false);
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [deckOpen, sheet]);
 
   const saveSettings = async (next: Settings) => {
     const previous = settings;
@@ -411,6 +443,18 @@ export default function App() {
     if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) e.currentTarget.scrollLeft += settings.language === "fa" ? -e.deltaY : e.deltaY;
   };
 
+  /** Scrolling down over the stage brings the servers up, unless the stage itself has to scroll. */
+  const onStageWheel = (e: React.WheelEvent<HTMLElement>) => {
+    const el = e.currentTarget;
+    if (e.deltaY > 0 && el.scrollHeight <= el.clientHeight + 1) setDeckOpen(true);
+  };
+
+  /** Scrolling further up at the top of the list folds it away; a scroll that just got there doesn't. */
+  const onDeckWheel = (e: React.WheelEvent<HTMLDivElement>) => {
+    const atTop = (deckScroll.current?.scrollTop ?? 0) <= 0;
+    if (e.deltaY < 0 && atTop && Date.now() - lastDeckScroll.current > 250) setDeckOpen(false);
+  };
+
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
     const list = q
@@ -421,19 +465,13 @@ export default function App() {
     return [...list].sort((a, b) => rank(delays[a.id]) - rank(delays[b.id]));
   }, [groupProfiles, query, sortByDelay, delays]);
 
-  const counts = useMemo(() => {
-    const c: Record<string, number> = {};
-    for (const p of profiles) c[p.groupId] = (c[p.groupId] ?? 0) + 1;
-    return c;
-  }, [profiles]);
-
   const selected = profiles.find((p) => p.id === settings.selected);
   const group = groups.find((g) => g.id === activeGroup);
   const sub = group?.subscription;
   const health = session?.health;
   const traffic = session?.traffic;
   const unhealthy = phase === "connected" && health && !health.ok;
-  const heroClass = unhealthy || phase === "reconnecting" ? "warning" : phase;
+  const rayState: RayState = status.blocked && !session ? "blocked" : unhealthy || phase === "reconnecting" ? "warning" : phase;
   // Apps can only be split in VPN mode; sites in every mode.
   const split = settings.split;
   const splitActive = split.enabled && (split.sites.length > 0 || (settings.mode === "tun" && split.apps.length > 0));
@@ -442,6 +480,8 @@ export default function App() {
   // The built-in group keeps its translated name until the user renames it.
   const groupName = (g: Group) => (g.id === DEFAULT_GROUP && g.name === "My servers" ? t("myServers") : g.name);
 
+  const selectedGroup = groups.find((g) => g.id === selected?.groupId);
+
   const expiryText = (expireSeconds: number) => {
     const days = Math.ceil((expireSeconds * 1000 - Date.now()) / 86_400_000);
     if (days < 0) return t("expired");
@@ -449,15 +489,19 @@ export default function App() {
     return `${days} ${t("daysLeft")}`;
   };
 
+  const word = status.blocked && !session ? t("blockedTitle") : unhealthy ? t("noInternet") : t(PHASE_LABEL[phase]);
+  const serverName = selected ? selected.name : t("noServerSelected");
+  const powerLabel = live ? t("disconnect") : t("connect");
+
   return (
     <I18n.Provider value={t}>
-      <div className="app">
-        <header className="topbar">
-          <div className="brand">
-            <img className="logo" src={logo} alt="" aria-hidden="true" />
-            <span>Phi2ray</span>
-          </div>
-          <div className="top-actions">
+      <div className={`shell ${deckOpen ? "deck-open" : ""}`} data-phase={rayState}>
+        <header className="titlebar" data-tauri-drag-region>
+          <span className="mark" data-tauri-drag-region>
+            <img src={logo} alt="" aria-hidden="true" data-tauri-drag-region />
+            Phi2ray
+          </span>
+          <div className="title-tools">
             <button className="icon-btn" onClick={() => setSheet("info")} aria-label={t("connectionInfo")} title={t("connectionInfo")}>
               {Icon.info()}
             </button>
@@ -467,102 +511,120 @@ export default function App() {
             <button className="icon-btn" onClick={() => setSheet("settings")} aria-label={t("settings")} title={t("settings")}>
               {Icon.settings()}
             </button>
+            <span className="title-gap" aria-hidden="true" />
+            <button className="window-btn" onClick={() => api.minimizeWindow().catch(() => {})} aria-label={t("minimize")} title={t("minimize")}>
+              {Icon.minimize()}
+            </button>
+            <button className="window-btn close" onClick={() => api.closeWindow().catch(() => {})} aria-label={t("close")} title={t("close")}>
+              {Icon.windowClose()}
+            </button>
           </div>
         </header>
 
-        {status.coreError ? (
-          <div className="alert warn">
-            {t("coreUnpackFailed")}
-            <span className="alert-detail ltr">{status.coreError}</span>
-          </div>
-        ) : (
-          !status.xrayFound && <div className="alert warn">{t("xrayMissing")}</div>
-        )}
-        {status.blocked && !session && (
-          <div className="alert danger">
-            <span>{t("blockedBanner")}</span>
-            <div className="alert-actions">
-              <button className="btn small primary" onClick={() => settings.selected && connect(settings.selected)} disabled={busy}>
-                {t("reconnect")}
-              </button>
-              <button className="btn small" onClick={disconnect} disabled={busy}>
-                {t("unblock")}
-              </button>
+        <main className="stage" onWheel={onStageWheel} {...inert(deckOpen)}>
+          {status.coreError ? (
+            <div className="alert warn">
+              {t("coreUnpackFailed")}
+              <span className="alert-detail ltr">{status.coreError}</span>
             </div>
-          </div>
-        )}
+          ) : (
+            !status.xrayFound && <div className="alert warn">{t("xrayMissing")}</div>
+          )}
 
-        <section className={`hero ${heroClass}`}>
-          <div className="hero-main">
-            <button className="power" onClick={togglePower} disabled={busy} aria-label={live ? t("disconnect") : t("connect")}>
-              <span className="power-ring" aria-hidden="true" />
-              {Icon.power(34)}
-            </button>
-            <div className="hero-status">
-              <div className="status-line">
-                <span className="status-title">{unhealthy ? t("noInternet") : t(PHASE_LABEL[phase])}</span>
-                {live && session && <span className="timer ltr">{formatDuration(now - session.startedAt)}</span>}
-              </div>
-              <div className="status-sub">{selected ? selected.name : t("noServerSelected")}</div>
-              {live && session && (
-                <div className="hero-chips">
-                  <button
-                    className={`chip health ${!health ? "checking" : health.ok ? "ok" : "failed"}`}
-                    onClick={checkHealth}
-                    title={t("checkAgain")}
-                  >
-                    {!health ? t("checking") : health.ok ? <span className="ltr">{health.ms} ms</span> : t("noTraffic")}
-                  </button>
-                  {session.exit && (
-                    <span className="chip" title={t("whatSitesSee")}>
-                      {session.exit.country ? `${countryName(session.exit.country, settings.language)} · ` : ""}
-                      <span className="ltr">{session.exit.ip}</span>
+          <div className="status">
+            <h1 className="word" key={word}>
+              {word}
+            </h1>
+            <div className="status-row">
+              <span className="status-server">{serverName}</span>
+              {live && (status.firewall || splitActive) && (
+                <span className="seals">
+                  {status.firewall && (
+                    <span title={t("killSwitchOn")} aria-label={t("killSwitchOn")}>
+                      {Icon.lock()}
                     </span>
                   )}
-                  {(status.firewall || splitActive) && (
-                    <span className="chip accent icons">
-                      {status.firewall && (
-                        <span title={t("killSwitchOn")} aria-label={t("killSwitchOn")}>
-                          {Icon.lock()}
-                        </span>
-                      )}
-                      {splitActive && (
-                        <span
-                          title={`${t("splitActive")} · ${t(split.mode === "exclude" ? "splitExclude" : "splitInclude")}`}
-                          aria-label={t("splitActive")}
-                        >
-                          {Icon.split(12)}
-                        </span>
-                      )}
+                  {splitActive && (
+                    <span
+                      title={`${t("splitActive")} · ${t(split.mode === "exclude" ? "splitExclude" : "splitInclude")}`}
+                      aria-label={t("splitActive")}
+                    >
+                      {Icon.split(12)}
                     </span>
                   )}
-                </div>
+                </span>
               )}
+              {live && session && <span className="clock ltr">{formatDuration(now - session.startedAt)}</span>}
             </div>
           </div>
 
-          {live && traffic && (
-            <div className="stats">
-              <div className="stat down">
-                <span className="stat-icon">{Icon.down()}</span>
-                <span className="stat-text">
-                  <strong className="ltr">{formatSpeed(traffic.downSpeed)}</strong>
-                  <span>
-                    {t("download")} · <span className="ltr">{formatBytes(traffic.downTotal)}</span>
-                  </span>
-                </span>
-              </div>
-              <div className="stat up">
-                <span className="stat-icon">{Icon.up()}</span>
-                <span className="stat-text">
-                  <strong className="ltr">{formatSpeed(traffic.upSpeed)}</strong>
-                  <span>
-                    {t("upload")} · <span className="ltr">{formatBytes(traffic.upTotal)}</span>
-                  </span>
-                </span>
+          <div className="field">
+            <Rays
+              state={rayState}
+              down={traffic?.downSpeed ?? 0}
+              up={traffic?.upSpeed ?? 0}
+              mirror={settings.language === "fa"}
+              paused={deckOpen || sheet === "settings" || sheet === "split" || sheet === "info" || sheet === "logs"}
+            />
+            <span className="field-end near">{t("thisPc")}</span>
+            {live && session?.exit && (
+              <button className="field-end far" onClick={() => setSheet("info")} title={t("whatSitesSee")}>
+                <strong>{session.exit.country ? countryName(session.exit.country, settings.language) : t("infoInternet")}</strong>
+                <span className="ltr">{session.exit.ip}</span>
+              </button>
+            )}
+            <button className="lens" onClick={togglePower} disabled={busy} aria-label={powerLabel} title={powerLabel}>
+              <Iris />
+            </button>
+          </div>
+
+          {status.blocked && !session && (
+            <div className="alert danger">
+              <span>{t("blockedBanner")}</span>
+              <div className="alert-actions">
+                <button className="btn small primary" onClick={() => settings.selected && connect(settings.selected)} disabled={busy}>
+                  {t("reconnect")}
+                </button>
+                <button className="btn small" onClick={disconnect} disabled={busy}>
+                  {t("unblock")}
+                </button>
               </div>
             </div>
           )}
+
+          <div className={`readouts ${live ? "" : "resting"}`}>
+            <div className="readout down">
+              <span className="readout-label">
+                {Icon.down()}
+                {t("download")}
+              </span>
+              <strong className="ltr">{live && traffic ? formatSpeed(traffic.downSpeed) : "—"}</strong>
+              <span className="readout-sub ltr">{live && traffic ? formatBytes(traffic.downTotal) : " "}</span>
+              <Spark value={traffic?.downSpeed ?? 0} active={live} />
+            </div>
+            <div className="readout up">
+              <span className="readout-label">
+                {Icon.up()}
+                {t("upload")}
+              </span>
+              <strong className="ltr">{live && traffic ? formatSpeed(traffic.upSpeed) : "—"}</strong>
+              <span className="readout-sub ltr">{live && traffic ? formatBytes(traffic.upTotal) : " "}</span>
+              <Spark value={traffic?.upSpeed ?? 0} active={live} />
+            </div>
+            <button
+              className={`readout delay ${!live ? "" : !health ? "checking" : health.ok ? "ok" : "failed"}`}
+              onClick={checkHealth}
+              disabled={!live}
+              title={live ? t("checkAgain") : undefined}
+            >
+              <span className="readout-label">
+                {Icon.bolt()}
+                {t("latency")}
+              </span>
+              <strong>{!live ? "—" : !health ? t("checking") : health.ok ? <span className="ltr">{health.ms} ms</span> : t("noTraffic")}</strong>
+              <span className="readout-sub">{live && health?.ok ? t("working") : " "}</span>
+            </button>
+          </div>
 
           <Segmented
             className="modes"
@@ -575,6 +637,7 @@ export default function App() {
 
           {needsReconnect && live && (
             <button className="reconnect-chip" onClick={() => settings.selected && connect(settings.selected)}>
+              {Icon.refresh()}
               {t("settingsChanged")}
             </button>
           )}
@@ -591,188 +654,224 @@ export default function App() {
               </button>
             </div>
           )}
-        </section>
+        </main>
 
-        <section className="servers">
-          <div className="servers-head">
-            <h2>{t("servers")}</h2>
-            <div className="servers-actions">
-              <button
-                className={`icon-btn ${sortByDelay ? "toggled" : ""}`}
-                onClick={() => setSortByDelay((s) => !s)}
-                aria-label={t("sortByDelay")}
-                title={t("sortByDelay")}
-              >
-                {Icon.sort()}
-              </button>
-              <button className="btn" onClick={testGroup} disabled={testing || !groupProfiles.length} title={t("testHint")}>
-                {Icon.bolt()}
-                {testing ? t("testing") : t("test")}
-              </button>
-              <button className="btn primary" onClick={openAdd}>
-                {Icon.plus()}
-                {t("add")}
-              </button>
-            </div>
-          </div>
+        <div className="minibar" {...inert(!deckOpen)}>
+          <span className="mini-dot" aria-hidden="true" />
+          <span className="mini-text">
+            <strong>{word}</strong>
+            <span>{serverName}</span>
+          </span>
+          {live && session && <span className="clock ltr">{formatDuration(now - session.startedAt)}</span>}
+          <button className="mini-power" onClick={togglePower} disabled={busy} aria-label={powerLabel} title={powerLabel}>
+            {Icon.power(17)}
+          </button>
+        </div>
 
-          <div className="tabs" role="tablist" aria-label={t("servers")} ref={tabsRef} onWheel={onTabsWheel}>
-            {groups.map((g) => (
-              <button
-                key={g.id}
-                role="tab"
-                aria-selected={g.id === activeGroup}
-                className={`tab ${g.id === activeGroup ? "active" : ""}`}
-                onClick={() => setActiveGroup(g.id)}
-              >
-                {g.subscription && <span className="tab-dot" aria-hidden="true" />}
-                {groupName(g)}
-                <span className="tab-count">{counts[g.id] ?? 0}</span>
-              </button>
-            ))}
-          </div>
+        <section className="deck" aria-label={t("servers")}>
+          <button className="deck-grip" onClick={() => setDeckOpen((o) => !o)} aria-expanded={deckOpen} aria-label={t("servers")}>
+            <span />
+          </button>
 
-          {group && (
-            <div className="group-bar">
-              <div className="group-info">
-                {sub ? (
-                  <>
-                    <span>
-                      {sub.updatedAt ? `${t("updated")} ${timeAgo(sub.updatedAt, t)}` : t("neverUpdated")}
-                      {sub.expire ? ` · ${expiryText(sub.expire)}` : ""}
-                    </span>
-                    {sub.total ? (
-                      <span className="usage">
-                        <span className="usage-bar">
-                          <i style={{ width: `${Math.min(100, (((sub.upload ?? 0) + (sub.download ?? 0)) / sub.total) * 100)}%` }} />
-                        </span>
-                        <span className="ltr">
-                          {formatBytes((sub.upload ?? 0) + (sub.download ?? 0))} / {formatBytes(sub.total)}
-                        </span>
-                      </span>
-                    ) : null}
-                    {sub.url.startsWith("http:") && <span className="group-error warn">{t("httpSubscription")}</span>}
-                    {sub.lastError && <span className="group-error">{sub.lastError}</span>}
-                  </>
-                ) : (
-                  <span>
-                    {counts[group.id] ?? 0} {t("serversCount")}
+          <div className="deck-head">
+            <div className="deck-peek" {...inert(deckOpen)}>
+              {profiles.length === 0 ? (
+                <>
+                  <span className="peek-text">
+                    <strong>{t("noServers")}</strong>
+                    <span>{t("noServersHint")}</span>
                   </span>
-                )}
-              </div>
-              {sub && (
-                <button
-                  className={`icon-btn ${updating === group.id ? "spinning" : ""}`}
-                  onClick={() => updateSubscription(group.id)}
-                  disabled={!!updating}
-                  aria-label={t("updateNow")}
-                  title={t("updateNow")}
-                >
-                  {Icon.refresh()}
+                  <button className="btn primary" onClick={openAdd}>
+                    {Icon.plus()}
+                    {t("add")}
+                  </button>
+                </>
+              ) : (
+                <button className="peek-open" onClick={() => setDeckOpen(true)}>
+                  {selected && <ProtocolBadge protocol={selected.protocol} />}
+                  <span className="peek-text">
+                    <strong>{serverName}</strong>
+                    <span>
+                      {t("servers")} · <span className="ltr">{profiles.length}</span>
+                      {selectedGroup ? ` · ${groupName(selectedGroup)}` : ""}
+                    </span>
+                  </span>
+                  {selected && <Latency value={delays[selected.id]} />}
+                  <span className="peek-chevron">{Icon.chevronUp()}</span>
                 </button>
               )}
-              <button className="icon-btn" onClick={() => setSheet("group")} aria-label={t("edit")} title={t("edit")}>
-                {Icon.more()}
-              </button>
             </div>
-          )}
 
-          {groupProfiles.length > 4 && (
-            <label className="search">
-              {Icon.search()}
-              <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder={t("searchServers")} />
-            </label>
-          )}
-
-          {groupProfiles.length === 0 ? (
-            <div className="empty">
-              {Icon.server()}
-              <p>{sub ? t("emptySubscription") : t("noServers")}</p>
-              <span>{sub ? t("emptySubscriptionHint") : t("noServersHint")}</span>
-              {!sub && (
+            <div className="deck-bar" {...inert(!deckOpen)}>
+              <h2>{t("servers")}</h2>
+              <div className="deck-actions">
+                <button
+                  className={`icon-btn ${sortByDelay ? "toggled" : ""}`}
+                  onClick={() => setSortByDelay((s) => !s)}
+                  aria-label={t("sortByDelay")}
+                  title={t("sortByDelay")}
+                >
+                  {Icon.sort()}
+                </button>
+                <button className="btn" onClick={testGroup} disabled={testing || !groupProfiles.length} title={t("testHint")}>
+                  {Icon.bolt()}
+                  {testing ? t("testing") : t("test")}
+                </button>
                 <button className="btn primary" onClick={openAdd}>
                   {Icon.plus()}
-                  {t("addServer")}
+                  {t("add")}
                 </button>
+              </div>
+            </div>
+          </div>
+
+          <div className="deck-body" {...inert(!deckOpen)}>
+            <div className="tabs" role="tablist" aria-label={t("servers")} ref={strip} onWheel={onTabsWheel}>
+              <span className="tab-marker" ref={marker} aria-hidden="true" />
+              {groups.map((g) => (
+                <button
+                  key={g.id}
+                  data-key={g.id}
+                  role="tab"
+                  aria-selected={g.id === activeGroup}
+                  className={`tab ${g.id === activeGroup ? "active" : ""}`}
+                  onClick={() => setActiveGroup(g.id)}
+                >
+                  {g.subscription && <span className="tab-dot" aria-hidden="true" />}
+                  {groupName(g)}
+                  <span className="tab-count ltr">{counts[g.id] ?? 0}</span>
+                </button>
+              ))}
+            </div>
+
+            <div className="deck-scroll" ref={deckScroll} onWheel={onDeckWheel} onScroll={() => (lastDeckScroll.current = Date.now())}>
+              {group && (
+                <div className="group-bar">
+                  <div className="group-info">
+                    {sub ? (
+                      <>
+                        <span>
+                          {sub.updatedAt ? `${t("updated")} ${timeAgo(sub.updatedAt, t)}` : t("neverUpdated")}
+                          {sub.expire ? ` · ${expiryText(sub.expire)}` : ""}
+                        </span>
+                        {sub.total ? (
+                          <span className="usage">
+                            <span className="usage-bar">
+                              <i style={{ width: `${Math.min(100, (((sub.upload ?? 0) + (sub.download ?? 0)) / sub.total) * 100)}%` }} />
+                            </span>
+                            <span className="ltr">
+                              {formatBytes((sub.upload ?? 0) + (sub.download ?? 0))} / {formatBytes(sub.total)}
+                            </span>
+                          </span>
+                        ) : null}
+                        {sub.url.startsWith("http:") && <span className="group-error warn">{t("httpSubscription")}</span>}
+                        {sub.lastError && <span className="group-error">{sub.lastError}</span>}
+                      </>
+                    ) : (
+                      <span>
+                        {counts[group.id] ?? 0} {t("serversCount")}
+                      </span>
+                    )}
+                  </div>
+                  {sub && (
+                    <button
+                      className={`icon-btn ${updating === group.id ? "spinning" : ""}`}
+                      onClick={() => updateSubscription(group.id)}
+                      disabled={!!updating}
+                      aria-label={t("updateNow")}
+                      title={t("updateNow")}
+                    >
+                      {Icon.refresh()}
+                    </button>
+                  )}
+                  <button className="icon-btn" onClick={() => setSheet("group")} aria-label={t("edit")} title={t("edit")}>
+                    {Icon.more()}
+                  </button>
+                </div>
+              )}
+
+              {groupProfiles.length > 4 && (
+                <label className="search">
+                  {Icon.search()}
+                  <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder={t("searchServers")} />
+                </label>
+              )}
+
+              {groupProfiles.length === 0 ? (
+                <div className="empty">
+                  {Icon.server()}
+                  <p>{sub ? t("emptySubscription") : t("noServers")}</p>
+                  <span>{sub ? t("emptySubscriptionHint") : t("noServersHint")}</span>
+                  {!sub && (
+                    <button className="btn primary" onClick={openAdd}>
+                      {Icon.plus()}
+                      {t("addServer")}
+                    </button>
+                  )}
+                </div>
+              ) : (
+                <ul className="server-list" key={activeGroup}>
+                  {visible.map((p, i) => {
+                    const isSelected = p.id === settings.selected;
+                    const isLive = live && session?.profileId === p.id;
+                    return (
+                      <li key={p.id} style={{ "--n": Math.min(i, 10) } as React.CSSProperties}>
+                        <button className={`server ${isSelected ? "selected" : ""} ${isLive ? "live" : ""}`} onClick={() => select(p.id)}>
+                          <ProtocolBadge protocol={p.protocol} />
+                          <span className="server-info">
+                            <span className="server-name">{p.name}</span>
+                            <span className="server-meta ltr">
+                              {p.stream.network}
+                              {p.stream.security !== "none" && ` · ${p.stream.security}`}
+                              {p.insecure && (
+                                <span
+                                  className="insecure"
+                                  title={t(p.insecure === "unencrypted" ? "insecureUnencrypted" : "insecureUnverified")}
+                                  aria-label={t(p.insecure === "unencrypted" ? "insecureUnencrypted" : "insecureUnverified")}
+                                >
+                                  {Icon.alert()}
+                                </span>
+                              )}
+                            </span>
+                          </span>
+                          <Latency value={delays[p.id]} />
+                        </button>
+                        {!sub && (
+                          <button className="icon-btn danger row-delete" onClick={() => remove(p.id)} aria-label={`${t("deleteServer")} ${p.name}`}>
+                            {Icon.trash()}
+                          </button>
+                        )}
+                      </li>
+                    );
+                  })}
+                  {visible.length === 0 && (
+                    <li className="no-match">
+                      {t("noMatch")} “{query}”
+                    </li>
+                  )}
+                </ul>
               )}
             </div>
-          ) : (
-            <ul className="server-list">
-              {visible.map((p) => {
-                const isSelected = p.id === settings.selected;
-                const isLive = live && session?.profileId === p.id;
-                return (
-                  <li key={p.id}>
-                    <button className={`server ${isSelected ? "selected" : ""} ${isLive ? "live" : ""}`} onClick={() => select(p.id)}>
-                      <ProtocolBadge protocol={p.protocol} />
-                      <span className="server-info">
-                        <span className="server-name">{p.name}</span>
-                        <span className="server-meta ltr">
-                          {p.stream.network}
-                          {p.stream.security !== "none" && ` · ${p.stream.security}`}
-                          {p.insecure && (
-                            <span
-                              className="insecure"
-                              title={t(p.insecure === "unencrypted" ? "insecureUnencrypted" : "insecureUnverified")}
-                              aria-label={t(p.insecure === "unencrypted" ? "insecureUnencrypted" : "insecureUnverified")}
-                            >
-                              {Icon.alert()}
-                            </span>
-                          )}
-                        </span>
-                      </span>
-                      <Latency value={delays[p.id]} />
-                    </button>
-                    {!sub && (
-                      <button className="icon-btn danger" onClick={() => remove(p.id)} aria-label={`${t("deleteServer")} ${p.name}`}>
-                        {Icon.trash()}
-                      </button>
-                    )}
-                  </li>
-                );
-              })}
-              {visible.length === 0 && (
-                <li className="no-match">
-                  {t("noMatch")} “{query}”
-                </li>
-              )}
-            </ul>
-          )}
+          </div>
         </section>
 
-        {sheet === "add" && (
-          <AddSheet
-            initialKind={addPreset.kind}
-            initialText={addPreset.text}
-            groups={groups}
-            defaultGroupId={activeGroup}
-            onAddLinks={addLinks}
-            onAddSubscription={addSubscription}
-            onCreateGroup={createGroup}
-            onClose={() => setSheet(null)}
-          />
-        )}
-
-        {sheet === "group" && group && (
-          <GroupSheet group={group} count={counts[group.id] ?? 0} onSave={saveGroup} onDelete={deleteGroup} onClose={() => setSheet(null)} />
-        )}
-
-        {sheet === "settings" && (
+        <Presence show={sheet === "settings" || sheet === "split"}>
           <SettingsSheet
             settings={settings}
             status={status}
             about={about}
             busy={busy}
             needsReconnect={needsReconnect && live}
+            covered={sheet === "split"}
             onChange={changeSettings}
             onModeChange={changeMode}
             onReconnect={() => settings.selected && connect(settings.selected)}
             onOpenSplit={() => setSheet("split")}
             onClose={() => setSheet(null)}
           />
-        )}
+        </Presence>
 
-        {sheet === "split" && (
+        <Presence show={sheet === "split"}>
           <SplitSheet
             value={settings.split}
             connectionMode={settings.mode}
@@ -783,18 +882,18 @@ export default function App() {
             }}
             onBack={() => setSheet("settings")}
           />
-        )}
+        </Presence>
 
-        {sheet === "info" && (
+        <Presence show={sheet === "info"}>
           <InfoSheet connected={live} language={settings.language} onClose={() => setSheet(null)} onCopy={copy} />
-        )}
+        </Presence>
 
-        {sheet === "logs" && (
+        <Presence show={sheet === "logs"}>
           <Sheet
             title={t("logs")}
             onClose={() => setSheet(null)}
             actions={
-              <div className="sheet-head-actions">
+              <div className="head-actions">
                 <button className="btn small" onClick={() => copy(logs.join("\n"))} disabled={!logs.length}>
                   {t("copy")}
                 </button>
@@ -804,16 +903,47 @@ export default function App() {
               </div>
             }
           >
-            <pre className="logs">
-              {logs.length ? logs.join("\n") : t("noLogs")}
-              <div ref={logEnd} />
-            </pre>
+            <div
+              className="logs"
+              ref={logBox}
+              onScroll={(e) => {
+                const el = e.currentTarget;
+                logFollow.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+              }}
+            >
+              {logs.length ? (
+                logs.map((line, i) => (
+                  <div key={i} className={`log-line ${logTag(line)}`}>
+                    {line}
+                  </div>
+                ))
+              ) : (
+                <div className="log-empty">{t("noLogs")}</div>
+              )}
+            </div>
             <p className="hint">{t("logsHint")}</p>
           </Sheet>
-        )}
+        </Presence>
 
-        {sheet === "admin" && (
-          <Sheet title={t("adminTitle")} onClose={() => setSheet(null)}>
+        <Presence show={sheet === "add"}>
+          <AddSheet
+            initialKind={addPreset.kind}
+            initialText={addPreset.text}
+            groups={groups}
+            defaultGroupId={activeGroup}
+            onAddLinks={addLinks}
+            onAddSubscription={addSubscription}
+            onCreateGroup={createGroup}
+            onClose={() => setSheet(null)}
+          />
+        </Presence>
+
+        <Presence show={sheet === "group"}>
+          {group && <GroupSheet group={group} count={counts[group.id] ?? 0} onSave={saveGroup} onDelete={deleteGroup} onClose={() => setSheet(null)} />}
+        </Presence>
+
+        <Presence show={sheet === "admin"}>
+          <Sheet dialog title={t("adminTitle")} onClose={() => setSheet(null)}>
             <p className="lead">{t("adminText")}</p>
             <div className="sheet-actions stacked">
               <button className="btn primary" onClick={() => api.relaunchAsAdmin().catch((e) => toast("error", String(e)))}>
@@ -833,10 +963,10 @@ export default function App() {
               )}
             </div>
           </Sheet>
-        )}
+        </Presence>
 
-        {sheet === "quit" && (
-          <Sheet title={t("quitTitle")} onClose={() => setSheet(null)}>
+        <Presence show={sheet === "quit"}>
+          <Sheet dialog title={t("quitTitle")} onClose={() => setSheet(null)}>
             <p className="lead">{session ? t("quitText") : t("quitTextBlocked")}</p>
             <div className="sheet-actions stacked">
               <button className="btn danger" onClick={() => api.quitApp().catch((e) => toast("error", String(e)))}>
@@ -856,7 +986,7 @@ export default function App() {
               </button>
             </div>
           </Sheet>
-        )}
+        </Presence>
 
         <div className="toasts" aria-live="polite">
           {toasts.map((x) => (

@@ -436,6 +436,21 @@ fn hide_window(app: AppHandle) {
     }
 }
 
+/// The title bar is drawn by the window itself, so its buttons come here. Minimizing still goes
+/// to the tray through the window event below.
+#[tauri::command]
+fn minimize_window(app: AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.minimize();
+    }
+}
+
+/// Same as the system close button: asks first while connected.
+#[tauri::command]
+fn close_window(app: AppHandle) {
+    tray::request_quit(&app);
+}
+
 // ---------- Connection ----------
 
 #[tauri::command]
@@ -757,6 +772,8 @@ pub fn run() {
             ping_dns,
             quit_app,
             hide_window,
+            minimize_window,
+            close_window,
             running_apps
         ])
         .build(tauri::generate_context!())

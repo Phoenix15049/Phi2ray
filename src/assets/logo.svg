@@ -3,23 +3,23 @@
 <svg version="1.1" id="Layer_1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" x="0px" y="0px"
 	 viewBox="0 0 512 512" style="enable-background:new 0 0 512 512;" xml:space="preserve">
 <style type="text/css">
-	.st0{fill:#0F1115;}
+	.st0{fill:#16262E;}
 	.st1{fill:none;stroke:url(#SVGID_1_);stroke-width:52;stroke-linecap:round;stroke-linejoin:round;}
 	.st2{fill:none;stroke:url(#SVGID_2_);stroke-width:52;stroke-linecap:round;}
 </style>
 <path class="st0" d="M112,0h288c61.9,0,112,50.1,112,112v288c0,61.9-50.1,112-112,112H112C50.1,512,0,461.9,0,400V112
 	C0,50.1,50.1,0,112,0z"/>
 <linearGradient id="SVGID_1_" gradientUnits="userSpaceOnUse" x1="61.6196" y1="348.2238" x2="459.9436" y2="272.389" gradientTransform="matrix(1 0 0 -1 0 514)">
-	<stop  offset="0" style="stop-color:#64E6F4"/>
-	<stop  offset="0.48" style="stop-color:#559CFF"/>
-	<stop  offset="0.78" style="stop-color:#6564F4"/>
-	<stop  offset="1" style="stop-color:#B977F1"/>
+	<stop  offset="0" style="stop-color:#DBC2CF"/>
+	<stop  offset="0.48" style="stop-color:#B9B4C6"/>
+	<stop  offset="0.78" style="stop-color:#6FB3C2"/>
+	<stop  offset="1" style="stop-color:#3C7A89"/>
 </linearGradient>
 <path class="st1" d="M208.9,85.1c-82.3,0-139.4,51.9-139.4,120.9c0,63,46,90.5,117.2,90.5h143.9c76.4,0,112-35.6,112-104.6
 	c0-57.1-30.4-77.1-80.1-77.1c-58.6,0-107.5,25.2-107.5,89"/>
 <linearGradient id="SVGID_2_" gradientUnits="userSpaceOnUse" x1="256" y1="149.774" x2="256" y2="47.726" gradientTransform="matrix(1 0 0 -1 0 514)">
-	<stop  offset="0" style="stop-color:#5DA7FF"/>
-	<stop  offset="1" style="stop-color:#A56DF5"/>
+	<stop  offset="0" style="stop-color:#DBC2CF"/>
+	<stop  offset="1" style="stop-color:#6FB3C2"/>
 </linearGradient>
 <path class="st2" d="M256,369v92.5"/>
 </svg>

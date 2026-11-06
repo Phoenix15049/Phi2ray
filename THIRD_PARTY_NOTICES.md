@@ -15,3 +15,6 @@ receive it from me, open an issue on this repository and I'll send it.
 The application itself is built with [Tauri](https://tauri.app) (MIT / Apache-2.0),
 [React](https://react.dev) (MIT) and the Rust and npm packages listed in `src-tauri/Cargo.lock`
 and `package-lock.json`, each under its own license.
+
+**Instrument Sans** and **Martian Mono** (the interface's fonts) are under the SIL Open Font
+License 1.1. Their license texts are in `src/assets/fonts/`.
