@@ -483,23 +483,15 @@ select {
   width: 100%;
   height: 100%;
   overflow: visible;
-  --iris-r: -6px;
-  --iris-turn: 0deg;
   --iris-color: var(--text-3);
 }
 [data-phase="connecting"] .iris {
-  --iris-r: 15px;
-  --iris-turn: 40deg;
   --iris-color: var(--hero);
 }
 [data-phase="connected"] .iris {
-  --iris-r: 37px;
-  --iris-turn: 80deg;
   --iris-color: var(--ok);
 }
 [data-phase="warning"] .iris {
-  --iris-r: 26px;
-  --iris-turn: 55deg;
   --iris-color: var(--warn);
 }
 [data-phase="disconnecting"] .iris {
@@ -637,23 +629,10 @@ select {
   stroke-width: 0.8;
   transition: stroke 0.5s;
 }
-.iris-turn {
-  transform: rotate(var(--iris-turn));
-  transition: transform 1.25s var(--glide);
-}
 .iris-blade {
   stroke: var(--seam);
   stroke-width: 0.6;
-  transform: translateX(var(--iris-r));
-  transition: transform 1.25s var(--glide);
-}
-[data-phase="connecting"] .iris-blade {
-  animation: iris-breathe 1.5s ease-in-out infinite;
-}
-@keyframes iris-breathe {
-  50% {
-    transform: translateX(calc(var(--iris-r) + 7px));
-  }
+  stroke-linejoin: round;
 }
 .iris-glyph {
   fill: none;
@@ -1967,17 +1946,28 @@ select {
 }
 .settings-section {
   scroll-margin-top: 6px;
-  margin-bottom: 22px;
+  margin-bottom: 16px;
+  padding: 0 9px 9px;
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--fill) 5%, var(--bg));
+  box-shadow: 0 0 0 1px var(--line);
 }
 .settings-section > h3 {
+  position: sticky;
+  z-index: 2;
+  top: -12px;
   display: flex;
   align-items: center;
   gap: 9px;
-  margin-bottom: 9px;
+  margin: 0 -9px 9px;
+  padding: 8px 10px;
+  border-radius: 16px 16px 0 0;
+  border-bottom: 1px solid var(--line);
   font-size: 14px;
   font-weight: 600;
   letter-spacing: -0.01em;
   color: var(--text);
+  background: color-mix(in srgb, var(--fill) 16%, var(--bg));
 }
 :root[lang="fa"] .settings-section > h3 {
   font-weight: 400;

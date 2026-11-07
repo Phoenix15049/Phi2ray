@@ -222,16 +222,82 @@ export function Rays(props: { state: RayState; down: number; up: number; mirror:
   return <canvas ref={canvas} className="rays" aria-hidden="true" />;
 }
 
+const BLADES = 9;
+/** Past the lens's rim, so a blade's outer end is never seen. */
+const BLADE_REACH = 130;
+/** How far a blade's edge bows from a straight line. */
+const BLADE_BOW = 16;
+/** Spring for the blades, tuned to settle without a bounce. */
+const BLADE_STIFFNESS = 26;
+const BLADE_DAMPING = 10.2;
+/** The hole's radius in each state; everything else is fully shut. */
+const APERTURE: Partial<Record<RayState, number>> = { connecting: 15, warning: 26, connected: 37 };
+
+/**
+ * One blade, drawn as the part of it that shows, so all nine are the same shape and none lies on
+ * top of another. The hole is a regular nonagon with inner radius `open`; each blade owns one of
+ * its sides and runs out to the rim between the extended sides next to it. Shut (0), every edge
+ * meets exactly in the centre.
+ */
+function bladePath(open: number) {
+  const step = (2 * Math.PI) / BLADES;
+  const corner = open / Math.cos(step / 2);
+  const turn = ([x, y]: number[], angle: number) => [x * Math.cos(angle) - y * Math.sin(angle), x * Math.sin(angle) + y * Math.cos(angle)];
+  const start = [corner, 0];
+  const end = turn(start, step);
+  // The edge leaving `end`, along the hole's side, and the same edge of the neighbouring blade.
+  const way = turn([1, 0], step / 2 + Math.PI / 2);
+  const tip = [end[0] + way[0] * BLADE_REACH, end[1] + way[1] * BLADE_REACH];
+  const bend = [end[0] + way[0] * BLADE_REACH * 0.5 - way[1] * BLADE_BOW, end[1] + way[1] * BLADE_REACH * 0.5 + way[0] * BLADE_BOW];
+  const f = (p: number[]) => `${p[0].toFixed(2)} ${p[1].toFixed(2)}`;
+  return `M${f(start)}L${f(end)}Q${f(bend)} ${f(tip)}L${f(turn(tip, -step))}Q${f(turn(bend, -step))} ${f(start)}Z`;
+}
+
 /** The lens: an iris that shuts the rays out when disconnected and opens to let them through. */
-export function Iris() {
-  const blades = 9;
+export function Iris({ phase }: { phase: RayState }) {
+  const blade = useRef<SVGPathElement>(null);
+  const motion = useRef({ open: 0, speed: 0 }).current;
+
+  useEffect(() => {
+    const el = blade.current;
+    if (!el) return;
+    const goal = APERTURE[phase] ?? 0;
+    const breathing = phase === "connecting";
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      motion.open = goal;
+      el.setAttribute("d", bladePath(goal));
+      return;
+    }
+    let frame = 0;
+    let last = performance.now();
+    const step = (now: number) => {
+      const dt = Math.min((now - last) / 1000, 0.032);
+      last = now;
+      const target = breathing ? goal + 3.5 * Math.sin(now / 240) : goal;
+      motion.speed += (BLADE_STIFFNESS * (target - motion.open) - BLADE_DAMPING * motion.speed) * dt;
+      motion.open = Math.max(0, motion.open + motion.speed * dt);
+      if (!breathing && Math.abs(goal - motion.open) < 0.02 && Math.abs(motion.speed) < 0.05) {
+        motion.open = goal;
+        motion.speed = 0;
+        el.setAttribute("d", bladePath(goal));
+        return;
+      }
+      el.setAttribute("d", bladePath(motion.open));
+      frame = requestAnimationFrame(step);
+    };
+    frame = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(frame);
+  }, [phase, motion]);
+
   return (
     <svg className="iris" viewBox="-64 -64 128 128" aria-hidden="true">
       <defs>
         <clipPath id="iris-clip">
           <circle r="45" />
         </clipPath>
-        <linearGradient id="iris-blade" x1="0" y1="0" x2="1" y2="1">
+        <path id="iris-leaf" ref={blade} className="iris-blade" d={bladePath(0)} fill="url(#iris-blade)" />
+        {/* Across a blade, so each one seems to sit under the next. */}
+        <linearGradient id="iris-blade" gradientUnits="userSpaceOnUse" x1="-17" y1="26" x2="17" y2="26">
           <stop className="iris-blade-a" offset="0" />
           <stop className="iris-blade-b" offset="1" />
         </linearGradient>
@@ -249,13 +315,9 @@ export function Iris() {
       <circle className="iris-barrel" r="47.5" stroke="url(#iris-barrel)" />
       <g clipPath="url(#iris-clip)">
         <circle className="iris-well" r="45" />
-        <g className="iris-turn">
-          {Array.from({ length: blades }, (_, i) => (
-            <g key={i} transform={`rotate(${(360 / blades) * i})`}>
-              <path className="iris-blade" d="M0 -82 L82 -82 L82 -15 L0 18 Z" fill="url(#iris-blade)" />
-            </g>
-          ))}
-        </g>
+        {Array.from({ length: BLADES }, (_, i) => (
+          <use key={i} href="#iris-leaf" transform={`rotate(${(360 / BLADES) * i})`} />
+        ))}
       </g>
       <circle className="iris-edge" r="45" />
       <circle className="iris-seal" r="19" />

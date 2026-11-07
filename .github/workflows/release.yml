@@ -216,6 +216,27 @@ jobs:
           name: phi2ray-linux-x64
           path: release/
 
+      - name: Keep the .deb as a file of its own
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          path: release/*.deb
+          archive: false
+
+      - name: Keep the .rpm as a file of its own
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          path: release/*.rpm
+          archive: false
+
+      - name: Keep the AppImage as a file of its own
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          path: release/*.AppImage
+          archive: false
+
   # Repackages the .deb, so it holds the very same files. A problem here doesn't hold the release
   # back: Arch users can use the AppImage meanwhile.
   arch:
@@ -249,6 +270,13 @@ jobs:
           name: phi2ray-arch-x64
           path: build/*.pkg.tar.zst
 
+      - name: Keep the package as a file of its own
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          path: build/*.pkg.tar.zst
+          archive: false
+
   publish:
     needs: [windows, linux, arch]
     if: ${{ !cancelled() && needs.windows.result == 'success' && needs.linux.result == 'success' }}
@@ -263,7 +291,7 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          pattern: phi2ray-*
+          pattern: phi2ray-*-x64
           path: release
           merge-multiple: true
 
@@ -297,19 +325,22 @@ jobs:
           SIGNED: ${{ needs.windows.outputs.signed }}
           ARCH: ${{ needs.arch.result }}
         run: |
+          base="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG"
           {
             echo "Built by GitHub Actions from commit $COMMIT."
+            echo
+            echo "Download only the file for your system:"
             echo
             echo "| Your system | File |"
             echo "|---|---|"
             for file in release/*; do
               name="$(basename "$file")"
               case "$name" in
-                *.exe) echo "| Windows 10 and 11 | \`$name\` |" ;;
-                *.deb) echo "| Ubuntu, Debian, Linux Mint, Pop!_OS, Zorin, Kali | \`$name\` |" ;;
-                *.rpm) echo "| Fedora, RHEL, AlmaLinux, Rocky | \`$name\` |" ;;
-                *.pkg.tar.zst) echo "| Arch, Manjaro, EndeavourOS | \`$name\` |" ;;
-                *.AppImage) echo "| Any other Linux, openSUSE included | \`$name\` |" ;;
+                *.exe) echo "| Windows 10 and 11 | [\`$name\`]($base/$name) |" ;;
+                *.deb) echo "| Ubuntu, Debian, Linux Mint, Pop!_OS, Zorin, Kali | [\`$name\`]($base/$name) |" ;;
+                *.rpm) echo "| Fedora, RHEL, AlmaLinux, Rocky | [\`$name\`]($base/$name) |" ;;
+                *.pkg.tar.zst) echo "| Arch, Manjaro, EndeavourOS | [\`$name\`]($base/$name) |" ;;
+                *.AppImage) echo "| Any other Linux, openSUSE included | [\`$name\`]($base/$name) |" ;;
               esac
             done
             echo

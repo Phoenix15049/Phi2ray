@@ -1,7 +1,7 @@
 # Repackages the Debian build for Arch, so both are the same files. The release workflow builds
 # this from the fresh .deb; to build it by hand, put the .deb next to this file and run makepkg.
 pkgname=phi2ray-bin
-pkgver=0.2.0
+pkgver=0.2.1
 pkgrel=1
 pkgdesc='A small, careful Xray client: VPN mode, kill switch, split tunnelling and subscriptions'
 arch=('x86_64')

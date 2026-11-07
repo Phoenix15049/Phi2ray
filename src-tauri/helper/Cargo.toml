@@ -1,6 +1,6 @@
 [package]
 name = "phi2ray-helper"
-version = "0.2.0"
+version = "0.2.1"
 description = "Phi2ray's small root helper on Linux: the VPN adapter, the kill switch and the cores' account."
 authors = ["M.R. Yadollahi"]
 license = "MIT"

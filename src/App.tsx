@@ -533,7 +533,7 @@ export default function App() {
           </span>
           <div className="title-tools">
             <button className="icon-btn" onClick={() => setSheet("info")} aria-label={t("connectionInfo")} title={t("connectionInfo")}>
-              {Icon.info()}
+              {Icon.globe()}
             </button>
             <button className="icon-btn" onClick={() => setSheet("logs")} aria-label={t("logs")} title={t("logs")}>
               {Icon.terminal()}
@@ -605,7 +605,7 @@ export default function App() {
               </button>
             )}
             <button className="lens" onClick={togglePower} disabled={busy} aria-label={powerLabel} title={powerLabel}>
-              <Iris />
+              <Iris phase={rayState} />
             </button>
           </div>
 

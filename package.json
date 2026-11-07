@@ -1,7 +1,7 @@
 {
   "name": "phi2ray",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "A small, careful Xray client for Windows and Linux: VPN mode, kill switch, split tunnelling and subscriptions.",
   "author": "M.R. Yadollahi",
   "license": "MIT",
