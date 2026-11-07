@@ -42,7 +42,25 @@ pub fn text() -> Result<String, String> {
     result
 }
 
+/// Through the desktop's own tools, whichever is installed.
 #[cfg(not(windows))]
 pub fn text() -> Result<String, String> {
-    Err("reading the clipboard is only supported on Windows for now; pipe the links in with `phi2ray add -`".into())
+    use std::process::{Command, Stdio};
+
+    const TOOLS: [(&str, &[&str]); 3] =
+        [("wl-paste", &["--no-newline"]), ("xclip", &["-selection", "clipboard", "-o"]), ("xsel", &["--clipboard", "--output"])];
+    let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
+    let mut found = false;
+    for (tool, args) in TOOLS.into_iter().filter(|(tool, _)| wayland || *tool != "wl-paste") {
+        let Ok(out) = Command::new(tool).args(args).stdin(Stdio::null()).stderr(Stdio::null()).output() else { continue };
+        found = true;
+        if out.status.success() && !out.stdout.is_empty() {
+            return String::from_utf8(out.stdout).map_err(|_| "the clipboard has no text. Copy the links first.".to_string());
+        }
+    }
+    Err(if found {
+        "the clipboard has no text. Copy the links first.".into()
+    } else {
+        "reading the clipboard needs wl-clipboard, xclip or xsel; or pipe the links in with `phi2ray add -`".into()
+    })
 }

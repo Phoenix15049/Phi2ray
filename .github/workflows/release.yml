@@ -1,12 +1,13 @@
-# Builds the single-file exe on GitHub from a version tag, so every release can be traced back to
-# its exact commit and build, and publishes it as a draft release with its SHA-256.
+# Builds every release file on GitHub from a version tag, so each can be traced back to its exact
+# commit and build, and publishes them as a draft release with their SHA-256:
+# the Windows exe, and for Linux a .deb, .rpm, Arch package and AppImage.
 #
-# - Push a tag like `v0.1.2` (matching the version in tauri.conf.json) to build and draft a release.
-# - Or run it by hand (Actions → Release → Run workflow) to build without releasing; the exe is
-#   kept as a workflow artifact.
+# - Push a tag like `v0.2.0` (matching the version in tauri.conf.json) to build and draft a release.
+# - Or run it by hand (Actions → Release → Run workflow) to build without releasing; the files are
+#   kept as workflow artifacts.
 #
-# Nothing ships if a dependency audit fails or a downloaded core doesn't match
-# src-tauri/core/SHA256SUMS. Actions are pinned to exact commits (tag noted after each).
+# Nothing ships if a dependency audit fails or a downloaded core doesn't match its pinned hash in
+# src-tauri/core. Actions are pinned to exact commits (tag noted after each).
 #
 # Tagged releases are signed through SignPath once the repository has the variables
 # SIGNPATH_ORGANIZATION_ID, SIGNPATH_PROJECT_SLUG and SIGNPATH_POLICY_SLUG and the secret
@@ -22,18 +23,18 @@ permissions:
   contents: read
 
 env:
-  # Must match the files pinned in src-tauri/core/SHA256SUMS.
+  # Must match the files pinned in src-tauri/core/SHA256SUMS and SHA256SUMS.linux.
   XRAY_VERSION: "26.10.21"
   SING_BOX_VERSION: "1.14.4"
 
 jobs:
-  build:
+  windows:
     runs-on: windows-latest
     permissions:
       actions: read # SignPath reads the unsigned artifact
-      contents: write # draft release
-      id-token: write # build attestation
-      attestations: write
+      contents: read
+    outputs:
+      signed: ${{ steps.final.outputs.signed }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -57,6 +58,7 @@ jobs:
           cargo install cargo-audit --version 0.22.2 --locked
           cargo audit --file src-tauri/Cargo.lock
           cargo audit --file src-tauri/cli/Cargo.lock
+          cargo audit --file src-tauri/helper/Cargo.lock
           npm audit --omit=dev --audit-level=high
 
       - name: Download and check the cores
@@ -101,7 +103,7 @@ jobs:
         if: github.ref_type == 'tag' && vars.SIGNPATH_PROJECT_SLUG != ''
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: phi2ray-unsigned
+          name: unsigned-windows-exe
           path: unsigned/
 
       - name: Sign the exe
@@ -120,7 +122,8 @@ jobs:
           parameters: |
             version: ${{ toJSON(env.APP_VERSION) }}
 
-      - name: Hash the exe
+      - name: Check the signature
+        id: final
         shell: pwsh
         run: |
           $exe = "release/$env:EXE_NAME"
@@ -131,51 +134,204 @@ jobs:
           } else {
             Copy-Item "unsigned/$env:EXE_NAME" $exe
           }
-          $hash = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLower()
-          "$hash *$env:EXE_NAME" | Out-File release/SHA256SUMS.txt -Encoding ascii
-          "EXE_SHA256=$hash" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
-          "EXE_SIGNED=$($signed.ToString().ToLower())" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
-
-      # Signed proof that this exe came from this repository, commit and workflow. GitHub offers
-      # it for public repositories (private ones need GitHub Enterprise).
-      - name: Attest the build
-        if: github.event.repository.visibility == 'public'
-        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
-        with:
-          subject-path: release/*.exe
+          "signed=$($signed.ToString().ToLower())" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: phi2ray-windows-x64
           path: release/
 
+  linux:
+    # The oldest supported Ubuntu: what's built here also runs on anything newer.
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 20
+
+      - name: Check the tag matches the app version
+        if: github.ref_type == 'tag'
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="$(jq -r .version src-tauri/tauri.conf.json)"
+          [ "v$version" = "$TAG" ] || { echo "Tag $TAG doesn't match the app version $version."; exit 1; }
+
+      - name: Install the build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf libfuse2 file rpm
+
+      - name: Download and check the cores
+        run: sh scripts/get-linux-cores.sh
+
+      - name: Build
+        env:
+          # linuxdeploy's own strip can't read some newer libraries.
+          NO_STRIP: "true"
+        run: |
+          npm ci
+          npm run build:linux
+
+      - name: Name the packages
+        run: |
+          version="$(jq -r .version src-tauri/tauri.conf.json)"
+          bundle=src-tauri/target/release/bundle
+          mkdir release
+          cp "$bundle"/deb/*.deb "release/Phi2ray-$version-linux-amd64.deb"
+          cp "$bundle"/rpm/*.rpm "release/Phi2ray-$version-linux-x86_64.rpm"
+          cp "$bundle"/appimage/*.AppImage "release/Phi2ray-$version-linux-x86_64.AppImage"
+          chmod +x release/*.AppImage
+
+      # VPN mode depends on these: the helper refuses a folder anyone but root can change.
+      - name: Check what's inside the packages
+        run: |
+          for file in usr/bin/phi2ray usr/bin/phi2ray-app usr/lib/phi2ray/phi2ray-helper usr/lib/phi2ray/xray \
+                      usr/lib/phi2ray/sing-box usr/lib/phi2ray/geoip.dat usr/share/polkit-1/actions/com.phi2ray.helper.policy; do
+            dpkg-deb -c release/*.deb | grep -q "\./$file\$" || { echo "$file is missing from the .deb"; exit 1; }
+            rpm -qlp release/*.rpm | grep -q "^/$file\$" || { echo "$file is missing from the .rpm"; exit 1; }
+          done
+          if dpkg-deb -c release/*.deb | awk '{print $2}' | grep -vE '^(root/root|0/0)$'; then
+            echo "Everything in the .deb must belong to root."
+            exit 1
+          fi
+          cd "$RUNNER_TEMP"
+          "$GITHUB_WORKSPACE"/release/*.AppImage --appimage-extract >/dev/null
+          for file in usr/bin/phi2ray usr/lib/phi2ray/phi2ray-helper usr/lib/phi2ray/xray usr/lib/phi2ray/sing-box usr/lib/phi2ray/com.phi2ray.helper.policy; do
+            [ -f "squashfs-root/$file" ] || { echo "$file is missing from the AppImage"; exit 1; }
+          done
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: phi2ray-linux-x64
+          path: release/
+
+  # Repackages the .deb, so it holds the very same files. A problem here doesn't hold the release
+  # back: Arch users can use the AppImage meanwhile.
+  arch:
+    needs: linux
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: phi2ray-linux-x64
+          path: linux
+      - name: Build the package
+        run: |
+          pacman -Syu --noconfirm --needed base-devel jq
+          useradd --create-home builder
+          version="$(jq -r .version src-tauri/tauri.conf.json)"
+          mkdir build
+          cp packaging/arch/* build/
+          cp linux/*.deb build/
+          sed -i "s/^pkgver=.*/pkgver=$version/" build/PKGBUILD
+          chown -R builder build
+          cd build
+          su builder -c 'makepkg --nodeps --noconfirm'
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: phi2ray-arch-x64
+          path: build/*.pkg.tar.zst
+
+  publish:
+    needs: [windows, linux, arch]
+    if: ${{ !cancelled() && needs.windows.result == 'success' && needs.linux.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # draft release
+      id-token: write # build attestation
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: phi2ray-*
+          path: release
+          merge-multiple: true
+
+      - name: Hash the files
+        run: |
+          cd release
+          sha256sum -- * > "$RUNNER_TEMP/SHA256SUMS.txt"
+          mv "$RUNNER_TEMP/SHA256SUMS.txt" SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      # Signed proof that these files came from this repository, commit and workflow. GitHub offers
+      # it for public repositories (private ones need GitHub Enterprise).
+      - name: Attest the build
+        if: github.event.repository.visibility == 'public'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            release/*.exe
+            release/*.deb
+            release/*.rpm
+            release/*.AppImage
+            release/*.pkg.tar.zst
+
       - name: Draft the release
         if: github.ref_type == 'tag'
-        shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
           COMMIT: ${{ github.sha }}
           ATTESTED: ${{ github.event.repository.visibility == 'public' }}
+          SIGNED: ${{ needs.windows.outputs.signed }}
+          ARCH: ${{ needs.arch.result }}
         run: |
-          $fence = '```'
-          $tick = '`'
-          $notes = @(
-            "Built by GitHub Actions from commit $env:COMMIT.",
-            "",
-            "**$env:EXE_NAME**",
-            "SHA-256: $tick$env:EXE_SHA256$tick",
-            ""
-          )
-          if ($env:ATTESTED -eq 'true') {
-            $notes += @("Check it was built here, from this commit:", "", "${fence}bash", "gh attestation verify $env:EXE_NAME -R $env:GITHUB_REPOSITORY", $fence, "")
-          }
-          $notes += @("Cores inside: Xray $env:XRAY_VERSION, sing-box $env:SING_BOX_VERSION", "", $fence)
-          $notes += Get-Content src-tauri/core/SHA256SUMS
-          $notes += @($fence, "")
-          if ($env:EXE_SIGNED -eq 'true') {
-            $notes += @("Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org)", "")
-          }
-          $notes += "[Code signing policy](https://github.com/$env:GITHUB_REPOSITORY/blob/main/CODE_SIGNING.md) | [Privacy policy](https://github.com/$env:GITHUB_REPOSITORY/blob/main/PRIVACY.md)"
-          $notes | Out-File notes.md -Encoding utf8
-          gh release create $env:TAG release/* --draft --verify-tag --title "Phi2ray $env:TAG" --notes-file notes.md
+          {
+            echo "Built by GitHub Actions from commit $COMMIT."
+            echo
+            echo "| Your system | File |"
+            echo "|---|---|"
+            for file in release/*; do
+              name="$(basename "$file")"
+              case "$name" in
+                *.exe) echo "| Windows 10 and 11 | \`$name\` |" ;;
+                *.deb) echo "| Ubuntu, Debian, Linux Mint, Pop!_OS, Zorin, Kali | \`$name\` |" ;;
+                *.rpm) echo "| Fedora, RHEL, AlmaLinux, Rocky | \`$name\` |" ;;
+                *.pkg.tar.zst) echo "| Arch, Manjaro, EndeavourOS | \`$name\` |" ;;
+                *.AppImage) echo "| Any other Linux, openSUSE included | \`$name\` |" ;;
+              esac
+            done
+            echo
+            echo "SHA-256:"
+            echo
+            echo '```'
+            cat release/SHA256SUMS.txt
+            echo '```'
+            echo
+            if [ "$ATTESTED" = true ]; then
+              echo "Check a file was built here, from this commit:"
+              echo
+              echo '```bash'
+              echo "gh attestation verify <file> -R $GITHUB_REPOSITORY"
+              echo '```'
+              echo
+            fi
+            echo "Cores inside: Xray $XRAY_VERSION, sing-box $SING_BOX_VERSION"
+            echo
+            if [ "$ARCH" != success ]; then
+              echo "The Arch package didn't build this time; the AppImage works on Arch too."
+              echo
+            fi
+            if [ "$SIGNED" = true ]; then
+              echo "Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org)"
+              echo
+            fi
+            echo "[Code signing policy](https://github.com/$GITHUB_REPOSITORY/blob/main/CODE_SIGNING.md) | [Privacy policy](https://github.com/$GITHUB_REPOSITORY/blob/main/PRIVACY.md)"
+          } > notes.md
+          gh release create "$TAG" release/* --draft --verify-tag --title "Phi2ray $TAG" --notes-file notes.md

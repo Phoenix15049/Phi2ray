@@ -9,6 +9,7 @@ use std::net::IpAddr;
 use serde::{Deserialize, Serialize};
 
 const MAX_ENTRIES: usize = 500;
+const WINDOWS: bool = cfg!(windows);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -25,7 +26,7 @@ pub enum SplitMode {
 pub struct SplitTunnel {
     pub enabled: bool,
     pub mode: SplitMode,
-    /// Process names (`Telegram.exe`) or full paths.
+    /// Process names (`Telegram.exe`, or `telegram-desktop` on Linux) or full paths.
     pub apps: Vec<String>,
     /// Domains (subdomains included), IPs or CIDR ranges.
     pub sites: Vec<String>,
@@ -36,7 +37,7 @@ pub struct SplitTunnel {
 pub struct Rules {
     pub domains: Vec<String>,
     pub cidrs: Vec<String>,
-    /// Case-insensitive regexes over the full executable path.
+    /// Regexes over the full executable path.
     pub app_patterns: Vec<String>,
 }
 
@@ -80,7 +81,7 @@ impl SplitTunnel {
         let mut apps: Vec<String> = Vec::new();
         for raw in &self.apps {
             let app = normalize_app(raw)?;
-            if !apps.iter().any(|a| a.eq_ignore_ascii_case(&app)) {
+            if !apps.iter().any(|a| if WINDOWS { a.eq_ignore_ascii_case(&app) } else { *a == app }) {
                 apps.push(app);
             }
         }
@@ -142,11 +143,19 @@ pub fn normalize_site(raw: &str) -> Result<Site, String> {
     }
 }
 
-/// `chrome` becomes `chrome.exe`; paths keep their form.
 fn normalize_app(raw: &str) -> Result<String, String> {
+    normalize_app_for(raw, WINDOWS)
+}
+
+/// On Windows `chrome` becomes `chrome.exe`, and paths use backslashes. Elsewhere a name is
+/// already the file's name.
+fn normalize_app_for(raw: &str, windows: bool) -> Result<String, String> {
     let app = raw.trim().trim_matches('"').trim();
     if app.is_empty() || app.chars().any(|c| c.is_control() || matches!(c, '*' | '?' | '<' | '>' | '|')) {
         return Err(format!("\"{}\" isn't a valid app name or path.", raw.trim()));
+    }
+    if !windows {
+        return Ok(app.to_string());
     }
     let is_path = app.contains(['\\', '/']);
     let file = app.rsplit(['\\', '/']).next().unwrap_or(app);
@@ -157,14 +166,19 @@ fn normalize_app(raw: &str) -> Result<String, String> {
     }
 }
 
-/// A case-insensitive regex matching the executable's full path: either exactly the given path,
-/// or any path ending in the given file name.
+/// A regex matching the executable's full path: either exactly the given path, or any path ending
+/// in the given file name. File names only ignore case on Windows.
 pub(crate) fn app_pattern(entry: &str) -> Option<String> {
-    let app = normalize_app(entry).ok()?;
-    if app.contains('\\') {
-        Some(format!("(?i)^{}$", regex_escape(&app)))
+    app_pattern_for(entry, WINDOWS)
+}
+
+fn app_pattern_for(entry: &str, windows: bool) -> Option<String> {
+    let app = normalize_app_for(entry, windows).ok()?;
+    let (flags, separator) = if windows { ("(?i)", "\\\\") } else { ("", "/") };
+    if app.contains(if windows { '\\' } else { '/' }) {
+        Some(format!("{flags}^{}$", regex_escape(&app)))
     } else {
-        Some(format!("(?i)(^|\\\\){}$", regex_escape(&app)))
+        Some(format!("{flags}(^|{separator}){}$", regex_escape(&app)))
     }
 }
 
@@ -201,11 +215,22 @@ mod tests {
 
     #[test]
     fn apps() {
-        assert_eq!(normalize_app("telegram").unwrap(), "telegram.exe");
-        assert_eq!(normalize_app(" \"C:/Apps/My App/app.exe\" ").unwrap(), "C:\\Apps\\My App\\app.exe");
-        assert!(normalize_app("a|b").is_err());
-        assert_eq!(app_pattern("Telegram.exe").unwrap(), r"(?i)(^|\\)Telegram\.exe$");
-        assert_eq!(app_pattern(r"C:\Program Files (x86)\x.exe").unwrap(), r"(?i)^C:\\Program Files \(x86\)\\x\.exe$");
+        let normalize = |app| normalize_app_for(app, true);
+        assert_eq!(normalize("telegram").unwrap(), "telegram.exe");
+        assert_eq!(normalize(" \"C:/Apps/My App/app.exe\" ").unwrap(), "C:\\Apps\\My App\\app.exe");
+        assert!(normalize("a|b").is_err());
+        assert_eq!(app_pattern_for("Telegram.exe", true).unwrap(), r"(?i)(^|\\)Telegram\.exe$");
+        assert_eq!(app_pattern_for(r"C:\Program Files (x86)\x.exe", true).unwrap(), r"(?i)^C:\\Program Files \(x86\)\\x\.exe$");
+    }
+
+    #[test]
+    fn apps_on_linux() {
+        assert_eq!(normalize_app_for(" firefox ", false).unwrap(), "firefox");
+        assert_eq!(normalize_app_for("/usr/lib/firefox/firefox", false).unwrap(), "/usr/lib/firefox/firefox");
+        assert!(normalize_app_for("a|b", false).is_err());
+        // Case matters here: another program may differ only in that.
+        assert_eq!(app_pattern_for("telegram-desktop", false).unwrap(), "(^|/)telegram-desktop$");
+        assert_eq!(app_pattern_for("/opt/my.app/run", false).unwrap(), r"^/opt/my\.app/run$");
     }
 
     #[test]
@@ -213,7 +238,7 @@ mod tests {
         let mut s = SplitTunnel {
             enabled: true,
             sites: vec!["www.a.com".into(), "A.com".into(), "1.1.1.1".into()],
-            apps: vec!["Steam".into(), "steam.exe".into()],
+            apps: vec!["Steam.exe".into(), if WINDOWS { "steam.exe".into() } else { "Steam.exe".into() }],
             ..Default::default()
         };
         s.normalize().unwrap();

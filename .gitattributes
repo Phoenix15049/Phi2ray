@@ -1,0 +1,4 @@
+# Scripts and package files run on Linux, whatever the checkout machine uses.
+*.sh text eol=lf
+packaging/arch/* text eol=lf
+src-tauri/linux/* text eol=lf

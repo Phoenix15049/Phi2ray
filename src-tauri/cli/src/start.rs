@@ -1,6 +1,6 @@
 //! `phi2ray start`: launches the app into the tray, then waits until it takes commands.
 //!
-//! The app is started from where it recorded itself (`Program Files\Phi2ray\bin\app.json`,
+//! On Windows the app is started from where it recorded itself (`Program Files\Phi2ray\bin\app.json`,
 //! which only administrators can write), and only if the file there is still the exact one it
 //! recorded. The exe often sits in a folder the user's programs can write to, and Windows asks
 //! to run it as administrator, so a swapped file must never be started. The file is held open
@@ -139,19 +139,49 @@ mod imp {
     }
 }
 
+/// Packages put the app in `/usr/bin`, which only root can change. An AppImage notes its own path
+/// when console control is on; it runs as the user, like this tool, so no check is needed.
 #[cfg(not(windows))]
 mod imp {
+    use std::os::unix::process::CommandExt;
+    use std::path::PathBuf;
+    use std::process::{Child, Command, Stdio};
+    use std::sync::Mutex;
+
     use crate::Failure;
 
-    pub struct Process;
+    const INSTALLED: &str = "/usr/bin/phi2ray-app";
+
+    pub struct Process(Mutex<Child>);
 
     impl Process {
         pub fn exited(&self) -> bool {
-            true
+            !matches!(self.0.lock().unwrap().try_wait(), Ok(None))
         }
     }
 
+    fn app() -> Result<PathBuf, Failure> {
+        let installed = PathBuf::from(INSTALLED);
+        if installed.exists() {
+            return Ok(installed);
+        }
+        let home = std::env::var_os("HOME").map(PathBuf::from).ok_or("HOME isn't set")?;
+        let path = std::fs::read_to_string(crate::ipc::app_record(&home))
+            .map_err(|_| "Phi2ray's location isn't known yet. Open Phi2ray yourself once, with console control on.")?;
+        Ok(PathBuf::from(path.trim()))
+    }
+
     pub fn start() -> Result<Process, Failure> {
-        Err("Starting Phi2ray from the console is only supported on Windows for now.".into())
+        let app = app()?;
+        let child = Command::new(&app)
+            .arg("--hidden")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            // Its own process group, so closing this terminal doesn't close Phi2ray.
+            .process_group(0)
+            .spawn()
+            .map_err(|e| format!("cannot start {}: {e}", app.display()))?;
+        Ok(Process(Mutex::new(child)))
     }
 }

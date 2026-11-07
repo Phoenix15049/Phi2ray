@@ -1,0 +1,52 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "mainBinaryName": "phi2ray-app",
+  "bundle": {
+    "active": true,
+    "targets": ["deb", "rpm", "appimage"],
+    "linux": {
+      "deb": {
+        "depends": ["nftables", "pkexec | policykit-1"],
+        "section": "net",
+        "files": {
+          "/usr/bin/phi2ray": "cli/target/release/phi2ray",
+          "/usr/lib/phi2ray/phi2ray-helper": "helper/target/release/phi2ray-helper",
+          "/usr/lib/phi2ray/xray": "core/xray",
+          "/usr/lib/phi2ray/sing-box": "core/sing-box",
+          "/usr/lib/phi2ray/libcronet.so": "core/libcronet.so",
+          "/usr/lib/phi2ray/geoip.dat": "core/geoip.dat",
+          "/usr/lib/phi2ray/geosite.dat": "core/geosite.dat",
+          "/usr/share/polkit-1/actions/com.phi2ray.helper.policy": "linux/com.phi2ray.helper.policy"
+        },
+        "postInstallScript": "linux/postinstall.sh"
+      },
+      "rpm": {
+        "depends": ["nftables", "polkit"],
+        "files": {
+          "/usr/bin/phi2ray": "cli/target/release/phi2ray",
+          "/usr/lib/phi2ray/phi2ray-helper": "helper/target/release/phi2ray-helper",
+          "/usr/lib/phi2ray/xray": "core/xray",
+          "/usr/lib/phi2ray/sing-box": "core/sing-box",
+          "/usr/lib/phi2ray/libcronet.so": "core/libcronet.so",
+          "/usr/lib/phi2ray/geoip.dat": "core/geoip.dat",
+          "/usr/lib/phi2ray/geosite.dat": "core/geosite.dat",
+          "/usr/share/polkit-1/actions/com.phi2ray.helper.policy": "linux/com.phi2ray.helper.policy"
+        },
+        "postInstallScript": "linux/postinstall.sh"
+      },
+      "appimage": {
+        "bundleMediaFramework": false,
+        "files": {
+          "/usr/bin/phi2ray": "cli/target/release/phi2ray",
+          "/usr/lib/phi2ray/phi2ray-helper": "helper/target/release/phi2ray-helper",
+          "/usr/lib/phi2ray/xray": "core/xray",
+          "/usr/lib/phi2ray/sing-box": "core/sing-box",
+          "/usr/lib/phi2ray/libcronet.so": "core/libcronet.so",
+          "/usr/lib/phi2ray/geoip.dat": "core/geoip.dat",
+          "/usr/lib/phi2ray/geosite.dat": "core/geosite.dat",
+          "/usr/lib/phi2ray/com.phi2ray.helper.policy": "linux/com.phi2ray.helper.policy"
+        }
+      }
+    }
+  }
+}

@@ -1,5 +1,5 @@
-//! Windows system proxy. The user's previous settings are saved to a marker file
-//! before we change them, so they can be restored even after a crash.
+//! The system proxy. The user's previous settings are saved to a marker file before we change
+//! them, so they can be restored even after a crash. Linux lives in `proxy_linux.rs`.
 
 use std::path::Path;
 
@@ -53,10 +53,10 @@ mod imp {
     }
 
     fn write_marker(marker: &Path, saved: &Saved) -> Result<(), String> {
-        crate::win::check_write_target(marker)?;
+        crate::platform::check_write_target(marker)?;
         // Written to a temporary file and renamed, so a crash can't leave half a backup.
         let tmp = marker.with_extension("tmp");
-        crate::win::check_write_target(&tmp)?;
+        crate::platform::check_write_target(&tmp)?;
         fs::write(&tmp, serde_json::to_vec(saved).unwrap()).map_err(|e| e.to_string())?;
         fs::rename(&tmp, marker).map_err(|e| e.to_string())
     }
@@ -205,17 +205,8 @@ mod imp {
 }
 
 #[cfg(not(windows))]
-mod imp {
-    use std::path::Path;
-
-    pub fn enable(_port: u16, _marker: &Path) -> Result<(), String> {
-        Err("system proxy is only supported on Windows for now".into())
-    }
-
-    pub fn restore(_marker: &Path) -> Result<(), String> {
-        Ok(())
-    }
-}
+#[path = "proxy_linux.rs"]
+mod imp;
 
 pub fn enable(port: u16, marker: &Path) -> Result<(), String> {
     imp::enable(port, marker)

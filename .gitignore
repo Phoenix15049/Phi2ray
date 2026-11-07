@@ -3,12 +3,14 @@ node_modules/
 dist/
 src-tauri/target/
 src-tauri/cli/target/
+src-tauri/helper/target/
 src-tauri/gen/
 
 # Core binaries are downloaded separately (see src-tauri/core/README.md)
 src-tauri/core/*
 !src-tauri/core/README.md
 !src-tauri/core/SHA256SUMS
+!src-tauri/core/SHA256SUMS.linux
 
 # Local tooling
 .claude/

@@ -22,7 +22,7 @@ use crate::probe::{self, ExitInfo, LocalProxy, Via};
 use crate::split::SplitMode;
 use crate::store::{Mode, Settings};
 use crate::xray::{SING_BOX_EXE, XRAY_EXE};
-use crate::{config, firewall, proxy, tun, win, AppState};
+use crate::{config, firewall, platform, proxy, tun, AppState};
 
 /// Returned by `connect` when the chosen options need an elevated process.
 pub const ADMIN_REQUIRED: &str = "ADMIN_REQUIRED";
@@ -194,8 +194,8 @@ pub fn connect(app: &AppHandle, state: &AppState, id: &str) -> Result<Session, S
             state.paths.core.display()
         ));
     }
-    if (settings.mode == Mode::Tun || settings.kill_switch) && !win::is_elevated() {
-        return Err(ADMIN_REQUIRED.into());
+    if settings.mode == Mode::Tun || settings.kill_switch {
+        platform::elevate()?;
     }
     if settings.mode == Mode::Tun {
         crate::verify_cached(state, &state.paths.sing_box())?;
@@ -320,6 +320,8 @@ fn start(
             socks_pass: &session.socks_pass,
             server_ip,
             xray_exe: &state.paths.xray(),
+            core_uid: platform::core_uid(),
+            local_dns: platform::system_dns(),
             settings,
         })?),
         _ => None,
@@ -360,7 +362,7 @@ pub fn disconnect(state: &AppState) {
     let _guard = state.switching.lock().unwrap();
     teardown(state);
     firewall::disable();
-    state.blocked.store(false, Ordering::SeqCst);
+    state.blocked.store(firewall::is_active(), Ordering::SeqCst);
 }
 
 /// Stops the connection but leaves the kill switch alone.
@@ -376,11 +378,21 @@ pub fn apply_kill_switch(state: &AppState, settings: &Settings) -> Result<(), St
     let _guard = state.switching.lock().unwrap();
     let connected = state.link.lock().unwrap().is_some();
     if settings.kill_switch && connected && !firewall::is_active() {
-        if !win::is_elevated() {
-            return Err("The kill switch needs administrator rights. Restart Phi2ray as administrator.".into());
-        }
+        platform::elevate().map_err(|e| {
+            if e == ADMIN_REQUIRED {
+                "The kill switch needs administrator rights. Restart Phi2ray as administrator.".to_string()
+            } else {
+                e
+            }
+        })?;
         firewall::enable(&firewall_rules(state, settings))?;
         log(state, "[app] Kill switch on");
+        // Only the cores' account gets past the kill switch, so an xray running as the user moves
+        // there, keeping its ports and credentials.
+        #[cfg(not(windows))]
+        if state.core.lock().unwrap().xray_is_local() {
+            restart(state, true, false)?;
+        }
     } else if !settings.kill_switch && firewall::is_active() {
         firewall::disable();
         state.blocked.store(false, Ordering::SeqCst);

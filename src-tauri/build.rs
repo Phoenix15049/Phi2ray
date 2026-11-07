@@ -4,7 +4,7 @@ use std::path::Path;
 fn main() {
     // Listing any path below makes cargo rerun this script only for those paths, so everything
     // the build embeds must be listed, or a changed icon would silently keep the old one.
-    for path in ["build.rs", "icons", "windows", "tauri.conf.json", "capabilities"] {
+    for path in ["build.rs", "icons", "windows", "tauri.conf.json", "tauri.linux.conf.json", "capabilities"] {
         println!("cargo:rerun-if-changed={path}");
     }
 

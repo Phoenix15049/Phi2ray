@@ -61,7 +61,7 @@ const inert = (on: boolean) => (on ? ({ inert: "" } as object) : {});
 /** The part of the app a log line came from, for its colour. */
 const logTag = (line: string) => (line.startsWith("[app]") ? "app" : line.startsWith("[console]") ? "app" : line.startsWith("[tun]") ? "tun" : line.startsWith("[xray]") ? "xray" : "");
 
-/** Whether Windows is set to dark, followed live for the "system" theme. */
+/** Whether the system is set to dark, followed live for the "system" theme. */
 function usePrefersDark() {
   const [dark, setDark] = useState(() => window.matchMedia("(prefers-color-scheme: dark)").matches);
   useEffect(() => {

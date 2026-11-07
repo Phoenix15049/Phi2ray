@@ -6,6 +6,9 @@
 //! folder on the user's PATH. Only administrators can write there, so nothing can swap the
 //! `phi2ray` command for another program.
 //!
+//! On Linux the command comes with the package and the pipe is a Unix socket; see
+//! `console_linux.rs`.
+//!
 //! Who can talk to the app (see `pipe::security`):
 //! - Only this computer (remote clients are refused) and only the Windows account running
 //!   Phi2ray, plus administrators and the system.
@@ -33,6 +36,11 @@ pub fn apply(app: &AppHandle, enabled: bool) -> Result<(), String> {
     let state = app.state::<AppState>();
     if enabled {
         listen(app)?;
+        #[cfg(not(windows))]
+        if let Err(e) = pipe::publish_tool(true) {
+            pipe::stop();
+            return Err(format!("Console control couldn't be turned on: {e}"));
+        }
         if let Some(bin) = bin_dir(&state) {
             if let Err(e) = install::add(&bin) {
                 pipe::stop();
@@ -43,6 +51,8 @@ pub fn apply(app: &AppHandle, enabled: bool) -> Result<(), String> {
     } else {
         // Off means off, even if tidying up fails: the app stops listening first.
         pipe::stop();
+        #[cfg(not(windows))]
+        let _ = pipe::publish_tool(false);
         if let Some(bin) = bin_dir(&state) {
             if let Err(e) = install::remove(&bin) {
                 connection::log(&state, format!("[app] Console control: {e}"));
@@ -63,6 +73,10 @@ pub fn startup(app: &AppHandle) {
     if let Err(e) = listen(app) {
         connection::log(&state, format!("[app] Console control: {e}"));
     }
+    #[cfg(not(windows))]
+    if let Err(e) = pipe::publish_tool(true) {
+        connection::log(&state, format!("[app] Console control: {e}"));
+    }
     if let Some(bin) = bin_dir(&state) {
         if let Err(e) = install::add(&bin) {
             connection::log(&state, format!("[app] Console control: {e}"));
@@ -70,7 +84,6 @@ pub fn startup(app: &AppHandle) {
     }
 }
 
-#[cfg(windows)]
 fn listen(app: &AppHandle) -> Result<(), String> {
     let (a, b, c) = (app.clone(), app.clone(), app.clone());
     pipe::start(pipe::Hooks {
@@ -78,11 +91,6 @@ fn listen(app: &AppHandle) -> Result<(), String> {
         quit: Box::new(move || b.exit(0)),
         log: Box::new(move |line| connection::log(&c.state::<AppState>(), line)),
     })
-}
-
-#[cfg(not(windows))]
-fn listen(_app: &AppHandle) -> Result<(), String> {
-    Err("console control is only supported on Windows for now".into())
 }
 
 /// `Program Files\Phi2ray\bin`, next to the cores. Builds without embedded cores have no
@@ -579,10 +587,10 @@ mod pipe {
         if listening.is_some() {
             return Ok(());
         }
-        let sid = crate::win::current_user_sid().ok_or("cannot tell which Windows account runs Phi2ray")?;
+        let sid = crate::platform::current_user_sid().ok_or("cannot tell which Windows account runs Phi2ray")?;
         let name = crate::ipc::pipe_name(&sid);
         let wide: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
-        let security = security(&sid, crate::win::is_elevated())?;
+        let security = security(&sid, crate::platform::is_elevated())?;
         // Right after turning it off and on again, the old pipe may take a moment to close.
         let mut first = create(&wide, true, &security);
         for _ in 0..10 {
@@ -727,7 +735,7 @@ mod pipe {
         /// rules, minus the Administrators owner, which needs elevation).
         #[test]
         fn the_user_can_connect_but_not_serve() {
-            let sid = crate::win::current_user_sid().unwrap();
+            let sid = crate::platform::current_user_sid().unwrap();
             let sddl = format!("D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;{CLIENT_ACCESS:#x};;;{sid})S:(ML;;NW;;;ME)");
             let wide: Vec<u16> = sddl.encode_utf16().chain(Some(0)).collect();
             let mut sd: PSECURITY_DESCRIPTOR = null_mut();
@@ -736,7 +744,7 @@ mod pipe {
             let name: Vec<u16> = format!(r"\\.\pipe\phi2ray-test-{}",std::process::id()).encode_utf16().chain(Some(0)).collect();
 
             let _server = create(&name, true, &security).unwrap();
-            if crate::win::is_elevated() {
+            if crate::platform::is_elevated() {
                 return; // Administrators may create instances; the rest only holds for the user.
             }
             let err = create(&name, false, &security).err().expect("a second server end was allowed");
@@ -795,9 +803,8 @@ mod pipe {
 }
 
 #[cfg(not(windows))]
-mod pipe {
-    pub fn stop() {}
-}
+#[path = "console_linux.rs"]
+mod pipe;
 
 // ---------- Installing the command ----------
 

@@ -1,0 +1,30 @@
+[package]
+name = "phi2ray-helper"
+version = "0.2.0"
+description = "Phi2ray's small root helper on Linux: the VPN adapter, the kill switch and the cores' account."
+authors = ["M.R. Yadollahi"]
+license = "MIT"
+edition = "2021"
+publish = false
+
+# Kept out of the app's workspace on purpose, like the console tool: it runs as root, so it has
+# only these three dependencies.
+[workspace]
+
+[[bin]]
+name = "phi2ray-helper"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

@@ -1,7 +1,7 @@
 # Privacy policy
 
 Phi2ray has no accounts, telemetry, analytics or update check, and there's no Phi2ray server.
-Your servers, subscriptions and settings stay on your PC, encrypted with your Windows account.
+Your servers, subscriptions and settings stay on your computer, encrypted for your account.
 Logs are kept in memory only and are gone when Phi2ray closes.
 
 Phi2ray only contacts other systems for the things below.
@@ -30,7 +30,7 @@ Phi2ray only contacts other systems for the things below.
   your server. For the IP quality check, your exit IP is also looked up on public DNS blocklists
   (Barracuda, blocklist.de, DroneBL, SpamCop and s5h) through Cloudflare's encrypted DNS.
 
-The map on that page places you from your Windows time zone. That stays on your PC.
+The map on that page places you from your computer's time zone. That stays on your computer.
 
 These services have their own privacy policies. Your server's operator can see the traffic you
 send through it, as with any VPN or proxy.

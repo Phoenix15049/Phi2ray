@@ -1,6 +1,6 @@
 //! The tool's end of the pipe to the app.
 //!
-//! Before anything is sent, the pipe must belong to Administrators. Phi2ray runs elevated and
+//! On Windows, before anything is sent, the pipe must belong to Administrators. Phi2ray runs elevated and
 //! creates it that way; a program posing as Phi2ray (one that took the pipe name while the app
 //! wasn't running) can't, since it isn't elevated, and is refused. The app also never lets
 //! the user's programs open server ends of its pipe (see the app's `console.rs`).
@@ -151,13 +151,28 @@ mod imp {
     }
 }
 
+/// A Unix socket in the user's own runtime folder. The app runs as the user on Linux, so there's
+/// no owner to check it against; the folder itself must be ours, though.
 #[cfg(not(windows))]
 mod imp {
-    use std::fs::File;
+    use std::io::ErrorKind;
+    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::net::UnixStream;
 
+    use super::not_running;
     use crate::Failure;
 
-    pub fn open() -> Result<File, Failure> {
-        Err(super::not_running())
+    pub fn open() -> Result<UnixStream, Failure> {
+        let path = crate::ipc::socket_path().ok_or("XDG_RUNTIME_DIR isn't set, so Phi2ray can't be found")?;
+        let me = std::fs::metadata("/proc/self").map_err(|e| e.to_string())?.uid();
+        match path.parent().map(std::fs::symlink_metadata) {
+            Some(Ok(dir)) if dir.is_dir() && dir.uid() == me => {}
+            Some(Ok(_)) => return Err("The console folder doesn't belong to this account, so nothing was sent.".into()),
+            _ => return Err(not_running()),
+        }
+        UnixStream::connect(&path).map_err(|e| match e.kind() {
+            ErrorKind::NotFound | ErrorKind::ConnectionRefused => not_running(),
+            _ => format!("cannot reach Phi2ray: {e}").into(),
+        })
     }
 }

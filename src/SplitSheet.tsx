@@ -91,7 +91,7 @@ export function SplitSheet(props: {
             <input
               className="input ltr-input"
               value={appDraft}
-              placeholder="Telegram.exe"
+              placeholder={/linux/i.test(navigator.userAgent) ? "telegram-desktop" : "Telegram.exe"}
               spellCheck={false}
               onChange={(e) => setAppDraft(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && appDraft.trim() && addApp(appDraft.trim())}

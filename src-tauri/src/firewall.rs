@@ -20,7 +20,8 @@
 use std::path::PathBuf;
 
 pub struct Rules {
-    /// Programs allowed to use the real network.
+    /// Programs allowed to use the real network. On Linux that's decided by the cores' account.
+    #[cfg_attr(not(windows), allow(dead_code))]
     pub apps: Vec<PathBuf>,
     pub allow_lan: bool,
 }
@@ -434,22 +435,36 @@ mod imp {
     }
 }
 
+/// On Linux the same rules are an nftables table, set by the helper (see `helper_protocol.rs`).
+/// Like the Windows filters they outlive the app, stay fail-closed, and a restart clears them.
 #[cfg(not(windows))]
 mod imp {
+    use std::path::Path;
+
     use super::Rules;
+    use crate::helper;
+    use crate::helper_protocol::KILL_SWITCH_FLAG;
 
     pub fn is_active() -> bool {
-        false
+        Path::new(KILL_SWITCH_FLAG).exists()
     }
 
-    pub fn enable(_rules: &Rules) -> Result<(), String> {
-        Err("The kill switch is only available on Windows for now.".into())
+    pub fn enable(rules: &Rules) -> Result<(), String> {
+        helper::ensure()?;
+        helper::kill_switch(true, rules.allow_lan)
     }
 
-    pub fn disable() {}
+    /// If the rules can't be removed (the password was refused, say), the kill switch stays on,
+    /// which is the safe side.
+    pub fn disable() {
+        if is_active() && helper::ensure().is_ok() {
+            let _ = helper::kill_switch(false, false);
+        }
+    }
 
+    /// Rules left by a run that ended without removing them. Nothing needs root to see them.
     pub fn recover() -> bool {
-        false
+        is_active()
     }
 }
 

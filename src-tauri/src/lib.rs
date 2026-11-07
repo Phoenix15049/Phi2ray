@@ -1,6 +1,7 @@
-// Release builds run as administrator. Without embedded cores they would run xray and sing-box
-// from a folder next to the exe that normal users can usually write to.
-#[cfg(all(not(debug_assertions), not(feature = "embed-cores")))]
+// Windows release builds run as administrator. Without embedded cores they would run xray and
+// sing-box from a folder next to the exe that normal users can usually write to. On Linux the app
+// runs as the user and packages keep the cores in a folder only root can change.
+#[cfg(all(windows, not(debug_assertions), not(feature = "embed-cores")))]
 compile_error!("Release builds must embed the cores: use `npm run build:exe`.");
 
 mod config;
@@ -10,9 +11,14 @@ mod cores;
 mod delay;
 mod dns;
 mod firewall;
+#[cfg(not(windows))]
+mod helper;
+#[allow(dead_code)]
+mod helper_protocol;
 mod ipc;
 mod netinfo;
 mod parser;
+mod platform;
 mod probe;
 mod proxy;
 mod split;
@@ -20,7 +26,6 @@ mod store;
 mod subscription;
 mod tray;
 mod tun;
-mod win;
 mod xray;
 
 use std::collections::HashMap;
@@ -426,8 +431,8 @@ async fn quit_app(app: AppHandle) -> Result<(), String> {
 
 /// Running programs, for picking split tunnel apps.
 #[tauri::command]
-async fn running_apps() -> Result<Vec<win::RunningApp>, String> {
-    tauri::async_runtime::spawn_blocking(win::running_apps).await.map_err(|e| e.to_string())
+async fn running_apps() -> Result<Vec<platform::RunningApp>, String> {
+    tauri::async_runtime::spawn_blocking(platform::running_apps).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -472,7 +477,7 @@ async fn status(app: AppHandle) -> Result<Status, String> {
         blocked: state.blocked.load(Ordering::SeqCst),
         xray_found: state.paths.xray().exists(),
         tun_found: state.paths.sing_box().exists(),
-        elevated: win::is_elevated(),
+        elevated: platform::is_elevated(),
         core_error: state.core_error.clone(),
     })
     .await
@@ -497,7 +502,7 @@ const LINKS: [(&str, &str); 2] = [("github", "https://github.com/Phoenix15049"),
 #[tauri::command]
 async fn open_link(name: String) -> Result<(), String> {
     let url = LINKS.iter().find(|(n, _)| *n == name).map(|(_, url)| *url).ok_or("Unknown link.")?;
-    win::open_url(url)
+    platform::open_url(url)
 }
 
 /// Only on request: it asks several outside services, so it never runs on its own.
@@ -588,8 +593,11 @@ async fn about(app: AppHandle) -> Result<AboutInfo, String> {
 
 #[tauri::command]
 fn relaunch_as_admin(app: AppHandle) -> Result<(), String> {
-    win::relaunch_as_admin()?;
-    app.exit(0);
+    platform::relaunch_as_admin()?;
+    // On Linux the app stays as it is: the helper is what needed starting.
+    if cfg!(windows) {
+        app.exit(0);
+    }
     Ok(())
 }
 
@@ -631,7 +639,7 @@ fn new_id() -> String {
 /// running as that user redirect the writes with links. Under Program Files only administrators
 /// can change anything; the store stays encrypted for the account (DPAPI) as before.
 fn admin_data_dir(base: &Path) -> Option<PathBuf> {
-    let dir = base.join("data").join(win::current_user_sid()?);
+    let dir = base.join("data").join(platform::current_user_sid()?);
     std::fs::create_dir_all(&dir).ok()?;
     Some(dir)
 }
@@ -644,6 +652,14 @@ fn find_core_dir(app: &AppHandle) -> PathBuf {
     if let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(|p| p.to_path_buf())) {
         candidates.push(dir.join("core"));
     }
+    #[cfg(not(windows))]
+    {
+        candidates.insert(0, PathBuf::from("/usr/lib/phi2ray"));
+        candidates.insert(1, PathBuf::from("/opt/phi2ray"));
+        if let Some(app_dir) = std::env::var_os("APPDIR") {
+            candidates.insert(2, PathBuf::from(app_dir).join("usr/lib/phi2ray"));
+        }
+    }
     #[cfg(debug_assertions)]
     candidates.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("core"));
 
@@ -653,6 +669,11 @@ fn find_core_dir(app: &AppHandle) -> PathBuf {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // WebKitGTK draws an empty window with NVIDIA's driver unless this is off.
+    #[cfg(not(windows))]
+    if Path::new("/proc/driver/nvidia").exists() && std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    }
     let builder = tauri::Builder::default();
     // Opening the exe again brings the running window forward instead of starting a second copy
     // (two copies would fight over the tunnel and the firewall). Release builds only: in
@@ -672,6 +693,11 @@ pub fn run() {
                 data,
             };
             let logs: Logs = Arc::new(Mutex::new(xray::LogBuf::default()));
+            #[cfg(not(windows))]
+            {
+                helper::init(logs.clone());
+                store::set_key_folder(paths.data.clone());
+            }
             let mut legacy_marker = None;
             // Single-exe builds unpack their cores first; other builds use the core folder.
             // When unpacking fails they run no core at all: never one found next to the exe,
@@ -712,8 +738,12 @@ pub fn run() {
                     "[app] Phi2ray closed unexpectedly while the kill switch was on. The internet stays blocked until you reconnect or unblock.".into(),
                 );
             }
+            let store = Store::load(&paths.store);
+            let core_error = core_error.or_else(|| {
+                store.locked.then(|| "Your saved servers are locked. Unlock your keyring and restart Phi2ray.".to_string())
+            });
             app.manage(AppState {
-                store: Mutex::new(Store::load(&paths.store)),
+                store: Mutex::new(store),
                 core: Mutex::new(Core::new(logs.clone())),
                 link: Mutex::new(None),
                 generation: AtomicU64::new(0),

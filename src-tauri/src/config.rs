@@ -390,6 +390,8 @@ pub(crate) mod tests {
                 socks_pass: "p",
                 server_ip: ip.parse().unwrap(),
                 xray_exe: std::path::Path::new(r"C:\Program Files\Phi2ray\core-0.1.0\xray.exe"),
+                core_uid: (!cfg!(windows)).then_some(990),
+                local_dns: (!cfg!(windows)).then(|| "192.168.1.1".parse().unwrap()),
                 settings: &settings,
             })
             .unwrap();

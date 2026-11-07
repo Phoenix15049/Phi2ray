@@ -1,0 +1,23 @@
+# Repackages the Debian build for Arch, so both are the same files. The release workflow builds
+# this from the fresh .deb; to build it by hand, put the .deb next to this file and run makepkg.
+pkgname=phi2ray-bin
+pkgver=0.2.0
+pkgrel=1
+pkgdesc='A small, careful Xray client: VPN mode, kill switch, split tunnelling and subscriptions'
+arch=('x86_64')
+url='https://github.com/Phoenix15049/Phi2ray'
+license=('MIT' 'MPL-2.0' 'GPL-3.0-or-later')
+depends=('gtk3' 'webkit2gtk-4.1' 'libayatana-appindicator' 'nftables' 'polkit')
+optdepends=('wl-clipboard: phi2ray add on Wayland' 'xclip: phi2ray add on X11')
+provides=('phi2ray')
+conflicts=('phi2ray')
+options=('!strip' '!debug')
+install=phi2ray.install
+source=("Phi2ray-${pkgver}-linux-amd64.deb")
+sha256sums=('SKIP')
+
+package() {
+    bsdtar -xf data.tar.* -C "$pkgdir"
+    chmod 755 "$pkgdir/usr/lib/phi2ray" "$pkgdir/usr/lib/phi2ray/phi2ray-helper" "$pkgdir/usr/lib/phi2ray/xray" "$pkgdir/usr/lib/phi2ray/sing-box"
+    chmod 755 "$pkgdir/usr/bin/phi2ray" "$pkgdir/usr/bin/phi2ray-app"
+}

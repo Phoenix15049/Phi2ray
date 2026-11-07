@@ -8,6 +8,7 @@ use std::path::Path;
 use serde_json::{json, Value};
 use url::Url;
 
+use crate::helper_protocol::TUN_NAME;
 use crate::split::{Rules as SplitRules, SplitMode};
 use crate::store::Settings;
 
@@ -23,6 +24,10 @@ pub struct TunInput<'a> {
     pub server_ip: IpAddr,
     /// Phi2ray's own xray, the only program that skips the tunnel by itself.
     pub xray_exe: &'a Path,
+    /// On Linux, the account both cores run as. Everything it sends stays outside the tunnel.
+    pub core_uid: Option<u32>,
+    /// The network's own DNS server, where the system's resolver can't be used for direct lookups.
+    pub local_dns: Option<IpAddr>,
     pub settings: &'a Settings,
 }
 
@@ -96,7 +101,12 @@ pub fn build(t: &TunInput) -> Result<Value, String> {
     // Without IPv6, only ask for IPv4 so apps don't try addresses that can't work.
     let dns_strategy = if s.ipv6 { "prefer_ipv4" } else { "ipv4_only" };
 
-    Ok(json!({
+    let local_dns = match t.local_dns {
+        Some(ip) => json!({ "type": "udp", "tag": "local", "server": ip.to_string() }),
+        None => json!({ "type": "local", "tag": "local" }),
+    };
+
+    let mut config = json!({
         "log": { "level": log_level, "timestamp": false },
         "dns": {
             "servers": [
@@ -104,7 +114,7 @@ pub fn build(t: &TunInput) -> Result<Value, String> {
                 // Resolves DoH/DoT hostnames (e.g. dns.adguard-dns.com) through the tunnel, so the
                 // ISP can neither see nor tamper with that lookup.
                 { "type": "tcp", "tag": "bootstrap", "server": "1.1.1.1", "detour": "proxy" },
-                { "type": "local", "tag": "local" }
+                local_dns
             ],
             "rules": dns_rules,
             "final": "remote",
@@ -113,7 +123,7 @@ pub fn build(t: &TunInput) -> Result<Value, String> {
         "inbounds": [{
             "type": "tun",
             "tag": "tun-in",
-            "interface_name": "Phi2ray",
+            "interface_name": TUN_NAME,
             // IPv6 is always captured, so it can't leak around the tunnel.
             "address": [format!("{ADAPTER_V4}/30"), "fdfe:dcba:9876::1/126"],
             "mtu": s.tun_mtu,
@@ -140,7 +150,21 @@ pub fn build(t: &TunInput) -> Result<Value, String> {
             "auto_detect_interface": true,
             "default_domain_resolver": "local"
         }
-    }))
+    });
+    if let Some(uid) = t.core_uid {
+        config["inbounds"][0]["exclude_uid"] = json!([uid]);
+    }
+    Ok(config)
+}
+
+/// The first DNS server in a `resolv.conf` that isn't this computer itself.
+#[cfg_attr(windows, allow(dead_code))]
+pub fn first_nameserver(resolv_conf: &str) -> Option<IpAddr> {
+    resolv_conf
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("nameserver"))
+        .filter_map(|server| server.trim().parse::<IpAddr>().ok())
+        .find(|ip| !ip.is_loopback() && !ip.is_unspecified())
 }
 
 /// One sing-box rule per kind of split entry (apps, domains, IP ranges), each with `action` merged in.
@@ -202,6 +226,8 @@ mod tests {
             socks_pass: "p",
             server_ip: "203.0.113.7".parse().unwrap(),
             xray_exe: Path::new(r"C:\Program Files\Phi2ray\core-0.1.0\xray.exe"),
+            core_uid: None,
+            local_dns: None,
             settings,
         }
     }
@@ -242,6 +268,39 @@ mod tests {
         assert!(rules.iter().any(|r| r["domain_suffix"][0] == "a.com" && r["outbound"] == "proxy"));
         // QUIC is only blocked for traffic that goes through the server.
         assert!(rules.iter().filter(|r| r["port"] == 443).all(|r| !r["process_path_regex"].is_null() || !r["domain_suffix"].is_null()));
+    }
+
+    #[test]
+    fn the_helper_accepts_every_config_the_app_builds() {
+        use crate::helper_protocol::check_tun_config;
+        use crate::split::{SplitMode, SplitTunnel};
+        fn linux(settings: &Settings) -> Value {
+            let input = TunInput { core_uid: Some(990), local_dns: Some("192.168.1.1".parse().unwrap()), ..input(settings) };
+            build(&input).unwrap()
+        }
+        let plain = Settings::default();
+        let c = linux(&plain);
+        assert_eq!(c["inbounds"][0]["exclude_uid"], json!([990]));
+        assert_eq!(c["dns"]["servers"][2], json!({ "type": "udp", "tag": "local", "server": "192.168.1.1" }));
+        check_tun_config(&c, 990).unwrap();
+
+        let split = SplitTunnel { enabled: true, mode: SplitMode::Exclude, apps: vec!["firefox".into()], sites: vec!["a.com".into(), "1.2.3.4".into()] };
+        for mode in [SplitMode::Exclude, SplitMode::Include] {
+            let settings = Settings {
+                split: SplitTunnel { mode, ..split.clone() },
+                iran_direct: true,
+                remote_dns: "https://dns.adguard-dns.com/dns-query".into(),
+                ..Settings::default()
+            };
+            check_tun_config(&linux(&settings), 990).unwrap();
+        }
+    }
+
+    #[test]
+    fn the_stub_resolver_is_skipped() {
+        assert_eq!(first_nameserver("# stub\nnameserver 127.0.0.53\noptions edns0\n"), None);
+        let found = first_nameserver("nameserver 127.0.0.53\nnameserver 192.168.1.1\nnameserver 8.8.8.8\n");
+        assert_eq!(found, Some("192.168.1.1".parse().unwrap()));
     }
 
     #[test]

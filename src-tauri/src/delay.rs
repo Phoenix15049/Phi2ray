@@ -43,6 +43,13 @@ pub async fn test(exe: &Path, asset_dir: &Path, profile: &Profile, target: &Test
     let port = std::net::TcpListener::bind("127.0.0.1:0").ok()?.local_addr().ok()?.port();
     let cfg = config::build_test(profile, port).to_string();
 
+    // With the helper up, a tunnel or the kill switch may be too, and only the cores' account
+    // reaches the server directly.
+    #[cfg(not(windows))]
+    if crate::helper::running() {
+        return test_with_helper(cfg, port, target).await;
+    }
+
     let mut cmd = Command::new(exe);
     cmd.args(["run", "-format", "json", "-c", "stdin:"])
         .env("XRAY_LOCATION_ASSET", asset_dir)
@@ -52,10 +59,15 @@ pub async fn test(exe: &Path, asset_dir: &Path, profile: &Profile, target: &Test
         .kill_on_drop(true);
     #[cfg(windows)]
     cmd.creation_flags(crate::xray::CREATE_NO_WINDOW);
+    // Tied to this thread, which lives as long as the app's async runtime.
+    #[cfg(not(windows))]
+    unsafe {
+        cmd.pre_exec(crate::platform::die_with_parent);
+    }
 
     let mut child = cmd.spawn().ok()?;
     #[cfg(windows)]
-    if child.raw_handle().is_none_or(|handle| crate::win::bind_to_app(handle).is_err()) {
+    if child.raw_handle().is_none_or(|handle| crate::platform::bind_to_app(handle).is_err()) {
         let _ = child.kill().await;
         return None;
     }
@@ -65,6 +77,14 @@ pub async fn test(exe: &Path, asset_dir: &Path, profile: &Profile, target: &Test
 
     let result = if sent && wait_ready(&mut child, port).await { measure(port, target).await } else { None };
     let _ = child.kill().await;
+    result
+}
+
+#[cfg(not(windows))]
+async fn test_with_helper(config: String, port: u16, target: &TestTarget) -> Option<u32> {
+    let test = tokio::task::spawn_blocking(move || crate::helper::start_test(config, port)).await.ok()??;
+    let result = measure(port, target).await;
+    let _ = tokio::task::spawn_blocking(move || crate::helper::stop_test(test)).await;
     result
 }
 

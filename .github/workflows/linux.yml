@@ -1,0 +1,63 @@
+# Builds and tests the Linux side on every push and pull request, without changing any network:
+# nftables and the cores only read the generated rules and configs (`nft --check`, `sing-box check`,
+# `xray run -test`).
+name: Linux check
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Must match the files pinned in src-tauri/core/SHA256SUMS.linux.
+  XRAY_VERSION: "26.10.21"
+  SING_BOX_VERSION: "1.14.4"
+
+jobs:
+  check:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 20
+
+      - name: Install the build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev nftables
+
+      - name: Build the interface
+        run: |
+          npm ci
+          npm run build
+
+      - name: Test the app, the console tool and the helper
+        env:
+          PHI2RAY_NFT_OUT: ${{ runner.temp }}/rules.nft
+          PHI2RAY_DUMP_DIR: ${{ runner.temp }}/configs
+        run: |
+          cargo test --locked --manifest-path src-tauri/Cargo.toml
+          cargo test --locked --manifest-path src-tauri/Cargo.toml -- --ignored dump_sample_configs
+          cargo test --locked --manifest-path src-tauri/cli/Cargo.toml
+          cargo build --locked --manifest-path src-tauri/helper/Cargo.toml
+
+      - name: Have nftables read the kill switch rules
+        run: sudo nft --check -f "$RUNNER_TEMP/rules.nft"
+
+      - name: Download and check the cores
+        run: sh scripts/get-linux-cores.sh
+
+      - name: Have the cores read the generated configs
+        run: |
+          for config in "$RUNNER_TEMP"/configs/*.json; do
+            XRAY_LOCATION_ASSET=src-tauri/core src-tauri/core/xray run -test -format json -c "$config"
+          done
+          for config in "$RUNNER_TEMP"/configs/sing-box/*.json; do
+            src-tauri/core/sing-box check -c "$config"
+          done

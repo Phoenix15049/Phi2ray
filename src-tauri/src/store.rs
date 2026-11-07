@@ -1,4 +1,5 @@
-//! Profiles and settings, saved encrypted with Windows DPAPI (bound to the current user).
+//! Profiles and settings, saved encrypted for the current user: with DPAPI on Windows, and with a
+//! key in the desktop's keyring on Linux (`vault_linux.rs`).
 
 use std::fs;
 use std::path::Path;
@@ -11,6 +12,10 @@ use crate::subscription::Subscription;
 
 /// Bump when a default changes in a way existing users should get.
 const SETTINGS_VERSION: u32 = 2;
+
+/// The key exists but can't be reached right now (a locked or missing keyring). The store isn't
+/// damaged, so it must be left alone. Windows never reports this.
+const KEY_UNAVAILABLE: &str = "KEY_UNAVAILABLE";
 
 /// The built-in group for servers added by hand. It can be renamed but not deleted.
 pub const DEFAULT_GROUP: &str = "default";
@@ -37,7 +42,7 @@ pub enum Mode {
     /// Whole-system VPN through a TUN adapter.
     #[default]
     Tun,
-    /// Windows system proxy.
+    /// The system's proxy setting.
     System,
     /// Only local SOCKS/HTTP ports.
     Manual,
@@ -126,7 +131,8 @@ impl Default for Settings {
             language: "en".into(),
             theme: "system".into(),
             always_on_top: false,
-            minimize_to_tray: true,
+            // Some Linux desktops show no tray icons, and a hidden window would seem lost there.
+            minimize_to_tray: cfg!(windows),
             console: false,
         }
     }
@@ -191,12 +197,16 @@ pub struct Store {
     pub resolved: std::collections::HashMap<String, std::net::IpAddr>,
     /// When each address in `resolved` was last confirmed (Unix seconds).
     pub resolved_at: std::collections::HashMap<String, u64>,
+    /// The saved store exists but its key can't be reached, so nothing may overwrite it.
+    #[serde(skip)]
+    pub locked: bool,
 }
 
 impl Store {
     pub fn load(path: &Path) -> Self {
         let Ok(bytes) = fs::read(path) else { return Self::fresh() };
-        match dpapi::unprotect(&bytes).and_then(|b| serde_json::from_slice::<Store>(&b).map_err(|e| e.to_string())) {
+        match vault::unprotect(&bytes).and_then(|b| serde_json::from_slice::<Store>(&b).map_err(|e| e.to_string())) {
+            Err(e) if e == KEY_UNAVAILABLE => Self { locked: true, ..Self::fresh() },
             Ok(mut store) => {
                 store.settings.migrate();
                 if store.settings.validate().is_err() {
@@ -226,7 +236,7 @@ impl Store {
             return;
         }
         let Ok(bytes) = fs::read(old) else { return };
-        if let Ok(store) = dpapi::unprotect(&bytes).and_then(|b| serde_json::from_slice::<Store>(&b).map_err(|e| e.to_string())) {
+        if let Ok(store) = vault::unprotect(&bytes).and_then(|b| serde_json::from_slice::<Store>(&b).map_err(|e| e.to_string())) {
             let _ = store.save(new);
         }
     }
@@ -269,17 +279,20 @@ impl Store {
     }
 
     pub fn save(&self, path: &Path) -> Result<(), String> {
+        if self.locked {
+            return Err("Your saved servers are locked. Unlock your keyring and restart Phi2ray.".into());
+        }
         let json = serde_json::to_vec(self).map_err(|e| e.to_string())?;
         let tmp = path.with_extension("tmp");
-        crate::win::check_write_target(path)?;
-        crate::win::check_write_target(&tmp)?;
-        fs::write(&tmp, dpapi::protect(&json)?).map_err(|e| e.to_string())?;
+        crate::platform::check_write_target(path)?;
+        crate::platform::check_write_target(&tmp)?;
+        fs::write(&tmp, vault::protect(&json)?).map_err(|e| e.to_string())?;
         fs::rename(&tmp, path).map_err(|e| e.to_string())
     }
 }
 
 #[cfg(windows)]
-mod dpapi {
+mod vault {
     use std::ptr::{null, null_mut};
 
     use windows_sys::Win32::Foundation::LocalFree;
@@ -313,15 +326,11 @@ mod dpapi {
 }
 
 #[cfg(not(windows))]
-mod dpapi {
-    pub fn protect(data: &[u8]) -> Result<Vec<u8>, String> {
-        Ok(data.to_vec())
-    }
+#[path = "vault_linux.rs"]
+mod vault;
 
-    pub fn unprotect(data: &[u8]) -> Result<Vec<u8>, String> {
-        Ok(data.to_vec())
-    }
-}
+#[cfg(not(windows))]
+pub use vault::set_folder as set_key_folder;
 
 #[cfg(test)]
 mod tests {

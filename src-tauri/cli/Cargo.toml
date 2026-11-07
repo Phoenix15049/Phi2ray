@@ -1,6 +1,6 @@
 [package]
 name = "phi2ray-cli"
-version = "0.1.3"
+version = "0.2.0"
 description = "The phi2ray console command: controls the running Phi2ray app."
 authors = ["M.R. Yadollahi"]
 license = "MIT"

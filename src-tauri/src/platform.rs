@@ -1,5 +1,5 @@
-//! Windows helpers: tie child processes to the app's lifetime, administrator elevation,
-//! and the list of running apps for split tunnelling.
+//! What differs between systems: tying child processes to the app's lifetime, administrator
+//! rights, and the list of running apps for split tunnelling. Linux lives in `platform_linux.rs`.
 
 /// A running program, offered when adding apps to the split tunnel.
 #[derive(serde::Serialize, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -105,6 +105,25 @@ mod imp {
                     .collect(),
             );
         }
+        None
+    }
+
+    /// The app either has administrator rights from the start or needs a restart to get them.
+    pub fn elevate() -> Result<(), String> {
+        if is_elevated() {
+            Ok(())
+        } else {
+            Err(crate::connection::ADMIN_REQUIRED.into())
+        }
+    }
+
+    /// Only the Linux cores run under an account of their own.
+    pub fn core_uid() -> Option<u32> {
+        None
+    }
+
+    /// Windows' own resolver already avoids the tunnel for sing-box's direct lookups.
+    pub fn system_dns() -> Option<std::net::IpAddr> {
         None
     }
 
@@ -226,31 +245,8 @@ mod imp {
 }
 
 #[cfg(not(windows))]
-mod imp {
-    pub fn is_elevated() -> bool {
-        true
-    }
-
-    pub fn relaunch_as_admin() -> Result<(), String> {
-        Err("Run Phi2ray with sudo to use VPN mode.".into())
-    }
-
-    pub fn open_url(_url: &str) -> Result<(), String> {
-        Err("Not supported on this system.".into())
-    }
-
-    pub fn listener_pids(_ports: &[u16]) -> Option<Vec<Vec<u32>>> {
-        None
-    }
-
-    pub fn current_user_sid() -> Option<String> {
-        None
-    }
-
-    pub fn running_apps() -> Vec<super::RunningApp> {
-        Vec::new()
-    }
-}
+#[path = "platform_linux.rs"]
+mod imp;
 
 pub use imp::*;
 

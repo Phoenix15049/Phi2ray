@@ -85,9 +85,16 @@ impl LogBuf {
     }
 }
 
+/// A running core. On Linux, once the helper is up, it starts them as their own account.
+enum Process {
+    Local(Child),
+    #[cfg(not(windows))]
+    Helped(crate::helper_protocol::Core),
+}
+
 pub struct Core {
-    xray: Option<Child>,
-    tun: Option<Child>,
+    xray: Option<Process>,
+    tun: Option<Process>,
     logs: Logs,
 }
 
@@ -98,8 +105,18 @@ impl Core {
 
     /// `ports` are xray's local listening ports; the first is the one sing-box uses.
     pub fn start_xray(&mut self, exe: &Path, asset_dir: &Path, config: &Value, ports: &[u16]) -> Result<(), String> {
+        #[cfg(not(windows))]
+        if crate::helper::running() {
+            // The helper replaces its own xray. One started here makes way first.
+            if let Some(Process::Local(old)) = self.xray.take() {
+                kill(old);
+            }
+            crate::helper::start_xray(&config.to_string(), ports)?;
+            self.xray = Some(Process::Helped(crate::helper_protocol::Core::Xray));
+            return Ok(());
+        }
         if let Some(old) = self.xray.take() {
-            kill(old);
+            stop(old);
         }
         let mut cmd = Command::new(exe);
         cmd.args(["run", "-format", "json", "-c", "stdin:"]).env("XRAY_LOCATION_ASSET", asset_dir);
@@ -126,14 +143,37 @@ impl Core {
             }
             thread::sleep(Duration::from_millis(50));
         }
-        self.xray = Some(child);
+        self.xray = Some(Process::Local(child));
         Ok(())
     }
 
+    /// Whether xray runs as the user instead of its own account, which the kill switch can't
+    /// tell from every other program.
+    #[cfg(not(windows))]
+    pub fn xray_is_local(&self) -> bool {
+        matches!(self.xray, Some(Process::Local(_)))
+    }
+
+    /// The helper checks the config and starts sing-box. An adapter left by an earlier run can
+    /// make the first try fail, so it gets a second one.
+    #[cfg(not(windows))]
+    pub fn start_tun(&mut self, _exe: &Path, _work_dir: &Path, config: &Value) -> Result<(), String> {
+        let config = config.to_string();
+        self.tun = None;
+        if let Err(e) = crate::helper::start_tun(&config) {
+            push_log(&self.logs, format!("[app] {e} Trying again."));
+            thread::sleep(Duration::from_secs(2));
+            crate::helper::start_tun(&config)?;
+        }
+        self.tun = Some(Process::Helped(crate::helper_protocol::Core::Tun));
+        Ok(())
+    }
+
+    #[cfg(windows)]
     pub fn start_tun(&mut self, exe: &Path, work_dir: &Path, config: &Value) -> Result<(), String> {
         std::fs::create_dir_all(work_dir).map_err(|e| e.to_string())?;
         if let Some(old) = self.tun.take() {
-            kill(old);
+            stop(old);
         }
         for attempt in 1..=2 {
             let mut cmd = Command::new(exe);
@@ -141,7 +181,7 @@ impl Core {
             let mut child = self.launch("tun", cmd, &config.to_string())?;
             match wait_for_adapter(&mut child) {
                 Ok(()) => {
-                    self.tun = Some(child);
+                    self.tun = Some(Process::Local(child));
                     return Ok(());
                 }
                 // An adapter left by an earlier run can make the first try fail ("already exists").
@@ -162,8 +202,8 @@ impl Core {
 
     /// Stops the TUN first, so traffic is never routed to a dead proxy.
     pub fn stop(&mut self) {
-        for child in [self.tun.take(), self.xray.take()].into_iter().flatten() {
-            kill(child);
+        for process in [self.tun.take(), self.xray.take()].into_iter().flatten() {
+            stop(process);
         }
     }
 
@@ -184,11 +224,14 @@ impl Core {
             cmd.creation_flags(CREATE_NO_WINDOW);
         }
 
+        #[cfg(not(windows))]
+        let mut child = crate::platform::spawn_bound(cmd).map_err(|e| format!("Failed to start {tag}: {e}"))?;
+        #[cfg(windows)]
         let mut child = cmd.spawn().map_err(|e| format!("Failed to start {tag}: {e}"))?;
         #[cfg(windows)]
         {
             use std::os::windows::io::AsRawHandle;
-            if let Err(e) = crate::win::bind_to_app(child.as_raw_handle()) {
+            if let Err(e) = crate::platform::bind_to_app(child.as_raw_handle()) {
                 kill(child);
                 return Err(format!("Failed to start {tag}: {e}"));
             }
@@ -231,7 +274,7 @@ pub enum PortState {
 
 /// Whether process `pid` (xray) listens on all `ports`, and nobody else does.
 pub fn port_state(pid: u32, ports: &[u16]) -> PortState {
-    match crate::win::listener_pids(ports) {
+    match crate::platform::listener_pids(ports) {
         Some(owners) => {
             if let Some((port, _)) = ports.iter().zip(&owners).find(|(_, pids)| pids.iter().any(|&p| p != pid)) {
                 return PortState::Taken(*port);
@@ -242,7 +285,7 @@ pub fn port_state(pid: u32, ports: &[u16]) -> PortState {
                 PortState::Waiting
             }
         }
-        // The table can't be read (not Windows): the first port accepting connections will do.
+        // The table can't be read: the first port accepting connections will do.
         None => {
             let addr = ([127, 0, 0, 1], ports[0]).into();
             if TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok() {
@@ -254,6 +297,7 @@ pub fn port_state(pid: u32, ports: &[u16]) -> PortState {
     }
 }
 
+#[cfg(windows)]
 /// Waits until sing-box's adapter actually has its address, so "connected" is never shown
 /// while traffic would still take the normal route. Err(Some) if sing-box quit, Err(None) on
 /// timeout.
@@ -291,8 +335,20 @@ pub fn push_log(logs: &Logs, mut line: String) {
     logs.lock().unwrap().push(line);
 }
 
-fn alive(child: &mut Option<Child>) -> Option<bool> {
-    child.as_mut().map(|c| matches!(c.try_wait(), Ok(None)))
+fn alive(process: &mut Option<Process>) -> Option<bool> {
+    process.as_mut().map(|process| match process {
+        Process::Local(child) => matches!(child.try_wait(), Ok(None)),
+        #[cfg(not(windows))]
+        Process::Helped(core) => crate::helper::alive(*core),
+    })
+}
+
+fn stop(process: Process) {
+    match process {
+        Process::Local(child) => kill(child),
+        #[cfg(not(windows))]
+        Process::Helped(core) => crate::helper::stop(core),
+    }
 }
 
 fn kill(mut child: Child) {

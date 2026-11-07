@@ -1,5 +1,5 @@
 //! The console protocol: what the `phi2ray` command-line tool sends to the running app over a
-//! local named pipe, and what comes back. The tool includes this same file, so both sides
+//! local named pipe (a Unix socket on Linux), and what comes back. The tool includes this same file, so both sides
 //! always agree on it.
 //!
 //! One request per connection. The tool writes a `Request` as one JSON line; the app answers
@@ -14,8 +14,22 @@ pub const VERSION: u32 = 1;
 pub const MAX_REQUEST: usize = 4 * 1024 * 1024;
 
 /// The pipe of one Windows account's Phi2ray, like `\\.\pipe\phi2ray-S-1-5-21-…`.
+#[cfg(windows)]
 pub fn pipe_name(sid: &str) -> String {
     format!(r"\\.\pipe\phi2ray-{sid}")
+}
+
+/// One account's socket on Linux. The runtime folder belongs to that account alone.
+#[cfg(not(windows))]
+pub fn socket_path() -> Option<std::path::PathBuf> {
+    let dir = std::path::PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR")?);
+    Some(dir.join("phi2ray").join("console.sock"))
+}
+
+/// Where an AppImage notes its own path, for `phi2ray start`.
+#[cfg(not(windows))]
+pub fn app_record(home: &std::path::Path) -> std::path::PathBuf {
+    home.join(".local/share/phi2ray/appimage-path")
 }
 
 #[derive(Serialize, Deserialize)]
