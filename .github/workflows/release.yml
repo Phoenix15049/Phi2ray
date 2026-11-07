@@ -193,7 +193,8 @@ jobs:
         run: |
           for file in usr/bin/phi2ray usr/bin/phi2ray-app usr/lib/phi2ray/phi2ray-helper usr/lib/phi2ray/xray \
                       usr/lib/phi2ray/sing-box usr/lib/phi2ray/geoip.dat usr/share/polkit-1/actions/com.phi2ray.helper.policy; do
-            dpkg-deb -c release/*.deb | grep -q "\./$file\$" || { echo "$file is missing from the .deb"; exit 1; }
+            # Tauri writes paths without the usual leading "./".
+            dpkg-deb -c release/*.deb | grep -Eq "[[:space:]](\./)?$file\$" || { echo "$file is missing from the .deb"; exit 1; }
             rpm -qlp release/*.rpm | grep -q "^/$file\$" || { echo "$file is missing from the .rpm"; exit 1; }
           done
           if dpkg-deb -c release/*.deb | awk '{print $2}' | grep -vE '^(root/root|0/0)$'; then
@@ -205,6 +206,10 @@ jobs:
           for file in usr/bin/phi2ray usr/lib/phi2ray/phi2ray-helper usr/lib/phi2ray/xray usr/lib/phi2ray/sing-box usr/lib/phi2ray/com.phi2ray.helper.policy; do
             [ -f "squashfs-root/$file" ] || { echo "$file is missing from the AppImage"; exit 1; }
           done
+          # linuxdeploy rewrites programs it finds in the AppImage; these must still start.
+          squashfs-root/usr/lib/phi2ray/xray version
+          squashfs-root/usr/lib/phi2ray/sing-box version
+          squashfs-root/usr/lib/phi2ray/phi2ray-helper 2>&1 | grep -q "started by Phi2ray"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
