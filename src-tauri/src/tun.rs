@@ -225,7 +225,7 @@ mod tests {
             socks_user: "u",
             socks_pass: "p",
             server_ip: "203.0.113.7".parse().unwrap(),
-            xray_exe: Path::new(r"C:\Program Files\Phi2ray\core-0.1.0\xray.exe"),
+            xray_exe: Path::new(if cfg!(windows) { r"C:\Program Files\Phi2ray\core-0.1.0\xray.exe" } else { "/usr/lib/phi2ray/xray" }),
             core_uid: None,
             local_dns: None,
             settings,
@@ -243,7 +243,8 @@ mod tests {
         assert_eq!(c["log"]["level"], "warn");
         // Only Phi2ray's own xray skips the tunnel, matched by its full path.
         let xray = &c["route"]["rules"][3]["process_path_regex"][0];
-        assert_eq!(xray, r"(?i)^C:\\Program Files\\Phi2ray\\core-0\.1\.0\\xray\.exe$");
+        let expected = if cfg!(windows) { r"(?i)^C:\\Program Files\\Phi2ray\\core-0\.1\.0\\xray\.exe$" } else { "^/usr/lib/phi2ray/xray$" };
+        assert_eq!(xray, expected);
         assert!(c["route"]["rules"].as_array().unwrap().iter().all(|r| r["process_name"].is_null()));
     }
 
