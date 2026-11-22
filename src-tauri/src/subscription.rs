@@ -142,12 +142,12 @@ pub async fn fetch(url: &str, proxy: Option<&crate::probe::LocalProxy>) -> Resul
     }
     let body = String::from_utf8_lossy(&bytes);
 
-    let parser::Parsed { profiles, skipped, .. } = parser::parse_many(&body);
+    let parser::Parsed { profiles, skipped, errors } = parser::parse_many(&body);
     if profiles.is_empty() {
         return Err(if body.trim().is_empty() {
             "The subscription is empty.".into()
         } else {
-            "No supported servers found. Only vless, vmess, trojan and shadowsocks links are supported.".into()
+            format!("No supported servers found. {}", errors.first().map(String::as_str).unwrap_or("Expected share links or Xray JSON."))
         });
     }
     Ok(Fetched {
@@ -234,26 +234,38 @@ fn decode_title(value: &str) -> Option<String> {
 /// Replaces a group's servers with fresh ones, keeping the ids of servers that didn't
 /// change, so the selection and test results survive an update.
 pub fn merge(old: &[Profile], fresh: Vec<Profile>, group_id: &str) -> Vec<Profile> {
-    let mut old_ids: HashMap<String, String> = old.iter().map(|p| (identity(p), p.id.clone())).collect();
-    fresh
-        .into_iter()
-        .map(|mut p| {
-            if let Some(id) = old_ids.remove(&identity(&p)) {
-                p.id = id;
-            }
-            p.group_id = group_id.to_string();
-            p
-        })
-        .collect()
+    use std::collections::VecDeque;
+    let mut incoming = fresh.into_iter().map(Some).collect::<Vec<_>>();
+    let mut by_identity = HashMap::<_, VecDeque<_>>::new();
+    for (index, profile) in incoming.iter().flatten().enumerate() {
+        by_identity.entry(identity(profile)).or_default().push_back(index);
+    }
+    let mut result = Vec::new();
+    for previous in old {
+        if previous.library.local {
+            result.push(previous.clone());
+        } else if let Some(index) = by_identity.get_mut(&identity(previous)).and_then(VecDeque::pop_front) {
+            let mut profile = incoming[index].take().expect("each incoming index is assigned once");
+            profile.id = previous.id.clone();
+            profile.library = previous.library.clone();
+            if profile.library.custom_name { profile.name = previous.name.clone(); }
+            result.push(profile);
+        }
+    }
+    result.extend(incoming.into_iter().flatten());
+    for profile in &mut result { profile.group_id = group_id.into(); }
+    result
+}
+
+pub fn fingerprint(p: &Profile) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(identity(p)))
 }
 
 /// What makes two servers "the same" across updates (the display name may change).
 fn identity(p: &Profile) -> String {
-    let s = &p.stream;
-    format!(
-        "{:?}|{}|{}|{}|{}|{}|{}|{}|{}",
-        p.protocol, p.address, p.port, p.secret, s.network, s.security, s.path, s.host, s.sni
-    )
+    serde_json::to_string(&(&p.protocol, &p.address, p.port, &p.secret, &p.method, &p.flow,
+        p.alter_id, &p.stream, &p.outbound_settings, &p.mux)).expect("profile connection fields serialize")
 }
 
 #[cfg(test)]
@@ -286,15 +298,52 @@ mod tests {
     }
 
     #[test]
+    fn identity_includes_transport_credentials_and_certificate_options() {
+        let p = parse_link("vless://id@example.invalid:443?type=xhttp&security=tls").unwrap();
+        for changed in ["&encryption=mlkem-key", "&pcs=abcd", "&extra=%7B%22noSSEHeader%22%3Atrue%7D"] {
+            let other = parse_link(&format!("vless://id@example.invalid:443?type=xhttp&security=tls{changed}")).unwrap();
+            assert_ne!(identity(&p), identity(&other));
+        }
+        let mut renamed = p.clone();
+        renamed.name = "renamed".into();
+        renamed.id = "new id".into();
+        renamed.group_id = "another group".into();
+        assert_eq!(identity(&p), identity(&renamed));
+    }
+
+    #[test]
+    fn refresh_preserves_manual_order_star_rename_and_local_imports() {
+        let link = |host: &str, name: &str| parse_link(&format!("trojan://pw@{host}:443#{name}")).unwrap();
+        let a = link("a.invalid", "Provider A");
+        let mut b = link("b.invalid", "My B");
+        b.library.starred = true;
+        b.library.custom_name = true;
+        let mut local = link("local.invalid", "Dropped file");
+        local.library.local = true;
+        let fresh = vec![link("a.invalid", "Provider renamed A"), link("new.invalid", "New"), link("b.invalid", "Provider renamed B")];
+        let merged = merge(&[b.clone(), local.clone(), a.clone()], fresh, "group");
+        assert_eq!(merged.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+            ["My B", "Dropped file", "Provider renamed A", "New"]);
+        assert_eq!((&merged[0].id, &merged[1].id, &merged[2].id), (&b.id, &local.id, &a.id));
+        assert!(merged[0].library.starred);
+        assert!(merged[1].library.local);
+        assert_eq!(fingerprint(&b), fingerprint(&link("b.invalid", "Updated label")));
+    }
+
+    #[test]
     fn local_redirect_targets() {
         let local = |u: &str| is_local_target(&url::Url::parse(u).unwrap());
         assert!(local("http://127.0.0.1:8080/x"));
         assert!(local("http://10.0.0.1/"));
         assert!(local("http://169.254.169.254/latest"));
         assert!(local("http://[::1]/"));
+        assert!(local("http://[::ffff:127.0.0.1]/"));
+        assert!(local("http://[::ffff:192.168.1.1]/"));
+        assert!(local("http://[::ffff:169.254.169.254]/latest"));
         assert!(local("http://LOCALHOST./"));
         assert!(!local("https://panel.example.com/sub"));
         assert!(!local("https://8.8.8.8/"));
+        assert!(!local("https://[::ffff:8.8.8.8]/"));
     }
 
     #[test]

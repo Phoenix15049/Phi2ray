@@ -22,6 +22,9 @@ const svg = (children: ReactNode, size = 18) => (
 );
 
 export const Icon = {
+  grip: () => <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" aria-hidden="true"><path d="M4 6h8M4 10h8" /></svg>,
+  edit: () => svg(<path d="m14 6 4 4M4 20l4.5-1L20 7.5 16.5 4 5 15.5z" />, 14),
+  star: (filled = false) => svg(<path fill={filled ? "currentColor" : "none"} d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-2.9-5.6 2.9 1.1-6.2L3 9.6l6.2-.9z" />, 14),
   power: (size?: number) =>
     svg(
       <>
@@ -66,7 +69,7 @@ export const Icon = {
       13,
     ),
   sort: () => svg(<path d="M7 4v16M3 16l4 4 4-4M17 20V4M13 8l4-4 4 4" />, 16),
-  shield: () => svg(<path d="M12 3 4 6v6c0 5 3.5 8 8 9 4.5-1 8-4 8-9V6z" />),
+  shield: (size?: number) => svg(<path d="M12 3 4 6v6c0 5 3.5 8 8 9 4.5-1 8-4 8-9V6z" />, size),
   globe: () =>
     svg(
       <>
@@ -188,6 +191,7 @@ export function Sheet(props: {
   children: ReactNode;
   actions?: ReactNode;
   dialog?: boolean;
+  returnFocusTo?: HTMLElement | null;
   /** Another page lies on top of this one, so Escape belongs to that one. */
   covered?: boolean;
   /** Stays under the header, for page-wide navigation. */
@@ -195,18 +199,51 @@ export function Sheet(props: {
 }) {
   const t = useT();
   const closing = useContext(Closing);
-  useEffect(() => {
-    if (props.covered) return;
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && props.onClose();
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [props.onClose, props.covered]);
+  const panel = useRef<HTMLDivElement>(null);
+  const opener = useRef(props.returnFocusTo ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null));
+  const onClose = useRef(props.onClose);
+  onClose.current = props.onClose;
+  useLayoutEffect(() => {
+    const node = panel.current;
+    if (!node || props.covered || closing) return;
+    const controls = () => Array.from(node.querySelectorAll<HTMLElement>(
+      'button, input, select, textarea, summary, a[href], [tabindex]',
+    )).filter((el) => !el.matches(':disabled, [tabindex="-1"]') && !el.closest('[inert]') && el.getClientRects().length > 0);
+    const focusFirst = () => (controls()[0] ?? node).focus();
+    if (!node.contains(document.activeElement)) focusFirst();
+    const keepFocus = (event: FocusEvent) => {
+      if (!node.contains(event.target as Node)) focusFirst();
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        onClose.current();
+      } else if (event.key === "Tab") {
+        const items = controls();
+        const edge = event.shiftKey ? items[0] : items[items.length - 1];
+        if (!items.length || document.activeElement === edge || !items.includes(document.activeElement as HTMLElement)) {
+          event.preventDefault();
+          (event.shiftKey ? items[items.length - 1] ?? node : items[0] ?? node).focus();
+        }
+      }
+    };
+    document.addEventListener("focusin", keepFocus);
+    document.addEventListener("keydown", onKey, true);
+    return () => {
+      document.removeEventListener("focusin", keepFocus);
+      document.removeEventListener("keydown", onKey, true);
+    };
+  }, [props.covered, closing]);
+  useLayoutEffect(() => {
+    if (closing && opener.current?.isConnected && !opener.current.closest("[inert]")) opener.current.focus();
+  }, [closing]);
 
   const state = closing ? "closing" : "open";
   if (props.dialog) {
     return (
-      <div className="scrim" data-state={state} onClick={props.onClose}>
-        <div className="dialog" role="dialog" aria-modal="true" aria-label={props.title} onClick={(e) => e.stopPropagation()}>
+      <div className="scrim" data-state={state} {...(closing ? { inert: "" } : {})} onClick={props.onClose}>
+        <div ref={panel} tabIndex={-1} className="dialog" role="dialog" aria-modal="true" aria-label={props.title} onClick={(e) => e.stopPropagation()}>
           <div className="dialog-head">
             <h2>{props.title}</h2>
             {props.actions}
@@ -220,7 +257,7 @@ export function Sheet(props: {
     );
   }
   return (
-    <div className={`page ${props.covered ? "covered" : ""}`} data-state={state} role="dialog" aria-label={props.title}>
+    <div ref={panel} tabIndex={-1} className={`page ${props.covered ? "covered" : ""}`} data-state={state} role="dialog" aria-modal="true" aria-label={props.title} {...(props.covered || closing ? { inert: "" } : {})}>
       <div className="page-head">
         <button className="icon-btn flip" onClick={props.onClose} aria-label={t("back")} title={t("back")}>
           {Icon.back()}
@@ -234,13 +271,14 @@ export function Sheet(props: {
   );
 }
 
-export function Switch(props: { checked: boolean; onChange: (v: boolean) => void; label: string }) {
+export function Switch(props: { checked: boolean; onChange: (v: boolean) => void; label: string; disabled?: boolean }) {
   return (
     <button
       role="switch"
       aria-checked={props.checked}
       aria-label={props.label}
       className={`switch ${props.checked ? "on" : ""}`}
+      disabled={props.disabled}
       onClick={() => props.onChange(!props.checked)}
     >
       <span />
@@ -282,12 +320,14 @@ export function Segmented<V extends string>(props: {
 /** Scrolls a strip sideways to an item, without moving anything around it. */
 export function revealInStrip(strip: HTMLElement | null, item: Element | null | undefined) {
   if (!strip || !(item instanceof HTMLElement)) return;
-  strip.scrollTo({ left: item.offsetLeft - (strip.clientWidth - item.offsetWidth) / 2, behavior: "smooth" });
+  strip.scrollTo({ left: item.offsetLeft - (strip.clientWidth - item.offsetWidth) / 2,
+    behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
 }
 
 /** Keeps a sliding marker under the active child of a scrolling strip. */
-export function useSlidingMarker(active: string, deps: unknown[]) {
-  const strip = useRef<HTMLDivElement>(null);
+export function useSlidingMarker(active: string, deps: unknown[], stripRef?: React.RefObject<HTMLDivElement>) {
+  const ownStrip = useRef<HTMLDivElement>(null);
+  const strip = stripRef ?? ownStrip;
   const marker = useRef<HTMLSpanElement>(null);
   useLayoutEffect(() => {
     const place = () => {
@@ -354,10 +394,13 @@ const PROTOCOL_LABEL: Record<Profile["protocol"], string> = {
   vmess: "VM",
   trojan: "TR",
   shadowsocks: "SS",
+  http: "HTTP",
+  socks: "SOCKS",
+  wireguard: "WG",
 };
 
 export function ProtocolBadge({ protocol }: { protocol: Profile["protocol"] }) {
-  return <span className={`proto proto-${protocol}`}>{PROTOCOL_LABEL[protocol]}</span>;
+  return <span className={`proto proto-${protocol}`} title={protocol === "wireguard" ? "WireGuard" : undefined}>{PROTOCOL_LABEL[protocol]}</span>;
 }
 
 export function formatBytes(bytes: number) {

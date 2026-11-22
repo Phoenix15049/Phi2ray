@@ -1,5 +1,4 @@
-//! Parses share links (vless://, vmess://, trojan://, ss://) and
-//! base64 subscription bodies into `Profile`s.
+//! Parses share links, Xray JSON and plain/base64 subscriptions into private profiles.
 
 use std::collections::HashMap;
 
@@ -10,6 +9,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use url::Url;
 
+#[path = "custom.rs"]
+pub(crate) mod custom;
+#[path = "wireguard.rs"]
+pub(crate) mod wireguard;
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Protocol {
@@ -17,6 +21,9 @@ pub enum Protocol {
     Vmess,
     Trojan,
     Shadowsocks,
+    Http,
+    Socks,
+    Wireguard,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -38,6 +45,9 @@ pub struct Stream {
     pub header_type: String,
     pub service_name: String,
     pub mode: String,
+    /// Advanced Xray transport options, kept private like the server credentials.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub options: Option<Value>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -48,7 +58,7 @@ pub struct Profile {
     pub protocol: Protocol,
     pub address: String,
     pub port: u16,
-    /// vless/vmess uuid, or trojan/shadowsocks password.
+    /// Protocol credential. Never included in ProfileView.
     pub secret: String,
     /// vless encryption, vmess security or shadowsocks cipher.
     pub method: String,
@@ -58,6 +68,21 @@ pub struct Profile {
     #[serde(default)]
     pub group_id: String,
     pub stream: Stream,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outbound_settings: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mux: Option<Value>,
+    #[serde(default)]
+    pub library: LibraryPreferences,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LibraryPreferences {
+    pub starred: bool,
+    pub custom_name: bool,
+    /// This profile was added by the user, even if it lives in a subscription group.
+    pub local: bool,
 }
 
 /// Most servers taken from one paste or subscription; real lists have tens to hundreds.
@@ -90,6 +115,7 @@ pub struct ProfileView {
     pub address: String,
     pub port: u16,
     pub group_id: String,
+    pub starred: bool,
     pub stream: StreamView,
     /// "unencrypted" or "unverified" (TLS that accepts any certificate); None when fine.
     pub insecure: Option<&'static str>,
@@ -102,6 +128,10 @@ pub struct StreamView {
 }
 
 impl Profile {
+    pub fn pin_downloads(&mut self, resolve: impl FnMut(&str, u16) -> Result<std::net::IpAddr, String>) -> Result<(), String> {
+        custom::pin_downloads(self, resolve)
+    }
+
     pub fn view(&self) -> ProfileView {
         ProfileView {
             id: self.id.clone(),
@@ -110,6 +140,7 @@ impl Profile {
             address: self.address.clone(),
             port: self.port,
             group_id: self.group_id.clone(),
+            starred: self.library.starred,
             stream: StreamView { network: self.stream.network.clone(), security: self.stream.security.clone() },
             insecure: self.insecure(),
         }
@@ -120,11 +151,13 @@ impl Profile {
     /// could pose as the server.
     pub fn insecure(&self) -> Option<&'static str> {
         let s = &self.stream;
-        let plain = s.security == "none"
+        let plain = matches!(s.security.as_str(), "" | "none")
             && match self.protocol {
-                Protocol::Vless | Protocol::Trojan => true,
+                Protocol::Vless => matches!(self.method.as_str(), "" | "none"),
+                Protocol::Trojan | Protocol::Http | Protocol::Socks => true,
                 Protocol::Vmess => matches!(self.method.as_str(), "none" | "zero"),
                 Protocol::Shadowsocks => matches!(self.method.as_str(), "none" | "plain"),
+                Protocol::Wireguard => false,
             };
         if plain {
             Some("unencrypted")
@@ -136,11 +169,14 @@ impl Profile {
     }
 }
 
-/// Parses pasted text: one link per line, or a base64 subscription body. At most
+/// Parses pasted links, JSON exports/lists, or a base64 subscription body. At most
 /// `MAX_PROFILES` servers are taken; the rest count as skipped.
 pub fn parse_many(text: &str) -> Parsed {
     let text = text.trim();
-    let body = if text.contains("://") {
+    if text.len() > 8 * 1024 * 1024 {
+        return Parsed { profiles: vec![], errors: vec!["Input exceeds 8 MB".into()], skipped: 1 };
+    }
+    let body = if text.starts_with(['{', '[']) || text.contains("://") || wireguard::contains_interface(text) {
         text.to_string()
     } else {
         b64_decode(text)
@@ -150,39 +186,75 @@ pub fn parse_many(text: &str) -> Parsed {
     };
 
     let mut out = Parsed { profiles: Vec::new(), errors: Vec::new(), skipped: 0 };
-    let fail = |out: &mut Parsed, message: String| {
-        out.skipped += 1;
-        if out.errors.len() < MAX_ERRORS {
-            out.errors.push(message);
-        }
-    };
-    let lines: Vec<(usize, &str)> =
-        body.lines().map(str::trim).enumerate().filter(|(_, l)| !l.is_empty() && !l.starts_with('#')).collect();
-    for (i, &(index, line)) in lines.iter().enumerate() {
-        if out.profiles.len() >= MAX_PROFILES || i >= MAX_LINES {
-            let rest = lines.len() - i;
+    let mut remaining = body.trim_start_matches('\u{feff}');
+    let mut index = 0;
+    let mut entries = 0;
+    while !remaining.is_empty() {
+        let trimmed = remaining.trim_start();
+        index += remaining[..remaining.len() - trimmed.len()].bytes().filter(|&b| b == b'\n').count();
+        remaining = trimmed;
+        if remaining.is_empty() { break; }
+        if out.profiles.len() >= MAX_PROFILES || entries >= MAX_LINES {
+            let rest = remaining.lines().filter(|l| !l.trim().is_empty() && !l.trim().starts_with('#')).count();
             out.skipped += rest;
             if out.errors.len() < MAX_ERRORS {
                 out.errors.push(format!("{rest} more lines skipped (the limit is {MAX_PROFILES} servers)"));
             }
             break;
         }
-        let what = format!("Line {} ({})", index + 1, scheme_of(line));
+        if wireguard::is_interface(remaining.lines().next().unwrap_or_default()) {
+            let (config, rest) = wireguard::split_config(remaining);
+            match wireguard::parse_config(config) {
+                Ok(p) => push(&mut out, p),
+                Err(error) => fail(&mut out, format!("Line {} (WireGuard): {error}", index + 1)),
+            }
+            let lines = config.lines().count();
+            entries += lines;
+            index += lines;
+            remaining = rest;
+            continue;
+        }
+        if remaining.starts_with(['{', '[']) {
+            let mut values = serde_json::Deserializer::from_str(remaining).into_iter::<Value>();
+            match values.next() {
+                Some(Ok(value)) => {
+                    let used = values.byte_offset();
+                    custom::collect(value, &mut out, 0);
+                    index += remaining[..used].bytes().filter(|&b| b == b'\n').count();
+                    remaining = &remaining[used..];
+                    entries += 1;
+                    continue;
+                }
+                _ => { fail(&mut out, format!("Line {} (JSON): invalid JSON", index + 1)); break; }
+            }
+        }
+        let (line, rest) = remaining.split_once('\n').unwrap_or((remaining, ""));
+        let line = line.trim();
+        remaining = rest;
+        index += 1;
+        if line.starts_with('#') { continue; }
+        entries += 1;
+        let what = format!("Line {} ({})", index, scheme_of(line));
         if line.len() > MAX_LINK_LEN {
             fail(&mut out, format!("{what}: link too long"));
             continue;
         }
         match parse_link(line) {
-            Ok(mut p) => {
-                if p.name.chars().count() > MAX_NAME_LEN {
-                    p.name = p.name.chars().take(MAX_NAME_LEN).collect();
-                }
-                out.profiles.push(p)
-            }
+            Ok(p) => push(&mut out, p),
             Err(e) => fail(&mut out, format!("{what}: {}", e.chars().take(80).collect::<String>())),
         }
     }
     out
+}
+
+fn fail(out: &mut Parsed, message: String) {
+    out.skipped += 1;
+    if out.errors.len() < MAX_ERRORS { out.errors.push(message); }
+}
+
+fn push(out: &mut Parsed, mut p: Profile) {
+    p.name = p.name.chars().take(MAX_NAME_LEN).collect();
+    out.profiles.push(p);
 }
 
 /// The link's protocol for error messages, or "?" when it doesn't look like one.
@@ -202,6 +274,7 @@ pub fn parse_link(link: &str) -> Result<Profile, String> {
         "trojan" => parse_url_style(link, Protocol::Trojan),
         "vmess" => parse_vmess(link),
         "ss" => parse_ss(link),
+        "npv" | "napsternetv" => Err("Use the provider's standard share link, Xray JSON or WireGuard file".into()),
         other => Err(format!("unsupported protocol: {}", other.chars().take(12).collect::<String>())),
     }
 }
@@ -216,11 +289,14 @@ fn parse_url_style(link: &str, protocol: Protocol) -> Result<Profile, String> {
     let address = strip_brackets(url.host_str().ok_or("missing host")?);
     let port = url.port().ok_or("missing port")?;
 
-    let q: HashMap<String, String> = url.query_pairs().into_owned().collect();
+    // Share links use URI escaping: a literal '+' in paths, keys or passwords is not a space.
+    let q: HashMap<String, String> = url.query().unwrap_or_default().split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .map(|(k, v)| (decode(k), decode(v))).collect();
     let get = |k: &str| q.get(k).map(|v| v.trim().to_string()).unwrap_or_default();
 
     let default_security = if protocol == Protocol::Trojan { "tls" } else { "none" };
-    let stream = Stream {
+    let mut stream = Stream {
         network: normalize_network(&get("type")),
         security: or(&get("security"), default_security),
         sni: or(&get("sni"), &get("peer")),
@@ -235,7 +311,9 @@ fn parse_url_style(link: &str, protocol: Protocol) -> Result<Profile, String> {
         header_type: get("headerType"),
         service_name: get("serviceName"),
         mode: get("mode"),
+        ..Default::default()
     };
+    custom::link_options(&mut stream, &q)?;
 
     let name = url.fragment().map(decode).unwrap_or_default();
     Ok(Profile {
@@ -250,6 +328,9 @@ fn parse_url_style(link: &str, protocol: Protocol) -> Result<Profile, String> {
         alter_id: 0,
         group_id: String::new(),
         stream,
+        outbound_settings: None,
+        mux: None,
+        library: LibraryPreferences::default(),
     })
 }
 
@@ -275,7 +356,7 @@ fn parse_vmess(link: &str) -> Result<Profile, String> {
     let is_grpc = network == "grpc";
     let header_type = s("type");
 
-    let stream = Stream {
+    let mut stream = Stream {
         security: or(&s("tls"), "none"),
         sni: s("sni"),
         fingerprint: s("fp"),
@@ -288,6 +369,9 @@ fn parse_vmess(link: &str) -> Result<Profile, String> {
         network,
         ..Default::default()
     };
+    let q = v.as_object().map(|o| o.iter().map(|(k, v)|
+        (k.clone(), v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string()))).collect()).unwrap_or_default();
+    custom::link_options(&mut stream, &q)?;
 
     Ok(Profile {
         id: new_id(),
@@ -301,6 +385,9 @@ fn parse_vmess(link: &str) -> Result<Profile, String> {
         alter_id: s("aid").parse().unwrap_or(0),
         group_id: String::new(),
         stream,
+        outbound_settings: None,
+        mux: None,
+        library: LibraryPreferences::default(),
     })
 }
 
@@ -350,6 +437,9 @@ fn parse_ss(link: &str) -> Result<Profile, String> {
         flow: String::new(),
         alter_id: 0,
         group_id: String::new(),
+        outbound_settings: None,
+        mux: None,
+        library: LibraryPreferences::default(),
         stream: Stream {
             network: "tcp".into(),
             security: "none".into(),
@@ -378,6 +468,8 @@ fn normalize_network(n: &str) -> String {
     match n.to_ascii_lowercase().as_str() {
         "" | "raw" => "tcp".into(),
         "splithttp" => "xhttp".into(),
+        "websocket" => "ws".into(),
+        "mkcp" => "kcp".into(),
         other => other.into(),
     }
 }
@@ -437,7 +529,11 @@ mod tests {
     fn insecure_servers() {
         let p = |l: &str| parse_link(l).unwrap().insecure();
         assert_eq!(p("vless://id@a.com:443?security=none"), Some("unencrypted"));
-        assert_eq!(p("trojan://pw@a.com:443?security=tls&allowInsecure=1"), Some("unverified"));
+        // Old saved profiles still show the warning; this core rejects new unverified TLS links.
+        let mut old = parse_link("trojan://pw@a.com:443").unwrap();
+        old.stream.allow_insecure = true;
+        assert_eq!(old.insecure(), Some("unverified"));
+        assert!(parse_link("trojan://pw@a.com:443?allowInsecure=1").is_err());
         assert_eq!(p("vless://id@a.com:443?security=reality&pbk=K"), None);
         assert_eq!(p("trojan://pw@a.com:443"), None);
         let ss = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, "aes-256-gcm:pw");

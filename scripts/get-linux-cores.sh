@@ -10,8 +10,8 @@ core="$(cd "$(dirname "$0")/../src-tauri/core" && pwd)"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
-curl -fsSL -o "$tmp/xray.zip" "https://github.com/XTLS/Xray-core/releases/download/v$xray_version/Xray-linux-64.zip"
-curl -fsSL -o "$tmp/sing-box.tar.gz" "https://github.com/SagerNet/sing-box/releases/download/v$sing_box_version/sing-box-$sing_box_version-linux-amd64.tar.gz"
+curl -fsSL --retry 3 --connect-timeout 15 --max-time 120 -o "$tmp/xray.zip" "https://github.com/XTLS/Xray-core/releases/download/v$xray_version/Xray-linux-64.zip"
+curl -fsSL --retry 3 --connect-timeout 15 --max-time 120 -o "$tmp/sing-box.tar.gz" "https://github.com/SagerNet/sing-box/releases/download/v$sing_box_version/sing-box-$sing_box_version-linux-amd64.tar.gz"
 
 unzip -qo "$tmp/xray.zip" xray geoip.dat geosite.dat -d "$core"
 tar -xzf "$tmp/sing-box.tar.gz" -C "$tmp"

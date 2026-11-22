@@ -5,7 +5,7 @@ use std::path::Path;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::process::{Child, Command};
 use tokio::time::{sleep, timeout};
@@ -106,18 +106,31 @@ async fn wait_ready(child: &mut Child, port: u16) -> bool {
 
 /// Times one request through the local HTTP proxy on `port`.
 pub async fn measure(port: u16, target: &TestTarget) -> Option<u32> {
-    let mut stream = TcpStream::connect(("127.0.0.1", port)).await.ok()?;
-    let start = Instant::now();
-    stream.write_all(&target.request).await.ok()?;
-    let mut buf = [0u8; 32];
-    let n = timeout(REQUEST_TIMEOUT, stream.read(&mut buf)).await.ok()?.ok()?;
-    let elapsed = start.elapsed().as_millis() as u32;
-    is_success(&buf[..n]).then_some(elapsed)
+    timeout(REQUEST_TIMEOUT, async {
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).await.ok()?;
+        let start = Instant::now();
+        stream.write_all(&target.request).await.ok()?;
+        read_success(&mut stream).await.then(|| start.elapsed().as_millis() as u32)
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+async fn read_success(stream: &mut (impl AsyncRead + Unpin)) -> bool {
+    // Read the entire status code and its separator, even when TCP splits them across reads.
+    let mut head = [0u8; 13];
+    stream.read_exact(&mut head).await.is_ok() && is_success(&head)
 }
 
 /// True for an HTTP 2xx status line. Redirects don't count (captive portals answer with one).
 fn is_success(head: &[u8]) -> bool {
-    head.starts_with(b"HTTP/1.") && matches!(head.get(9), Some(b'2'))
+    head.starts_with(b"HTTP/1.")
+        && matches!(head.get(7), Some(b'0' | b'1'))
+        && head.get(8) == Some(&b' ')
+        && head.get(9) == Some(&b'2')
+        && head.get(10..12).is_some_and(|code| code.iter().all(u8::is_ascii_digit))
+        && matches!(head.get(12), Some(b' ' | b'\r'))
 }
 
 #[cfg(test)]
@@ -130,6 +143,28 @@ mod tests {
         assert!(!is_success(b"HTTP/1.0 302 Found"));
         assert!(!is_success(b"HTTP/1.1 502 Bad Gateway"));
         assert!(!is_success(b""));
+        assert!(!is_success(b"HTTP/1.1 2"));
+        assert!(!is_success(b"HTTP/1.1 2xx Invalid"));
+        assert!(!is_success(b"HTTP/1.1 2040 Invalid"));
+    }
+
+    #[test]
+    fn fragmented_and_truncated_status_codes() {
+        tauri::async_runtime::block_on(async {
+            let (mut writer, mut reader) = tokio::io::duplex(7);
+            let task = tauri::async_runtime::spawn(async move {
+                writer.write_all(b"HTTP/1.").await.unwrap();
+                tokio::task::yield_now().await;
+                writer.write_all(b"1 204 ").await.unwrap();
+            });
+            assert!(read_success(&mut reader).await);
+            task.await.unwrap();
+
+            let mut truncated = &b"HTTP/1.1 20"[..];
+            assert!(!read_success(&mut truncated).await);
+            let mut failed = &b"HTTP/1.1 502 Bad Gateway\r\n"[..];
+            assert!(!read_success(&mut failed).await);
+        });
     }
 
     #[test]

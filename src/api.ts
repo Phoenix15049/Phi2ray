@@ -7,10 +7,11 @@ export type Mode = "tun" | "system" | "manual";
 export type Profile = {
   id: string;
   name: string;
-  protocol: "vless" | "vmess" | "trojan" | "shadowsocks";
+  protocol: "vless" | "vmess" | "trojan" | "shadowsocks" | "http" | "socks" | "wireguard";
   address: string;
   port: number;
   groupId: string;
+  starred: boolean;
   stream: { network: string; security: string };
   /** Not encrypted to the server, or its TLS certificate isn't checked. */
   insecure: "unencrypted" | "unverified" | null;
@@ -33,7 +34,10 @@ export type Group = {
   id: string;
   name: string;
   subscription: Subscription | null;
+  sortByDelay: boolean;
 };
+
+export type LibraryKind = "group" | "profile";
 
 export const DEFAULT_GROUP = "default";
 
@@ -53,6 +57,8 @@ export type Settings = {
   selected: string | null;
   autoConnect: boolean;
   killSwitch: boolean;
+  absoluteMode: boolean;
+  absoluteTimezone: string;
   autoReconnect: boolean;
   bypassLan: boolean;
   iranDirect: boolean;
@@ -98,6 +104,8 @@ export type Session = {
 };
 
 export type Status = {
+  absolute: { phase: string; timezone: string | null; exitIp: string | null; error: string | null };
+  absoluteSupported: boolean;
   session: Session | null;
   firewall: boolean;
   blocked: boolean;
@@ -135,11 +143,16 @@ export type Geo = {
 export type Quality = {
   /** 0 to 100, higher is better. */
   score: number | null;
-  vpn: boolean;
-  proxy: boolean;
-  tor: boolean;
-  hosting: boolean;
-  compromised: boolean;
+  scoreSource: string | null;
+  risk: number | null;
+  confidence: number | null;
+  vpn: boolean | null;
+  proxy: boolean | null;
+  tor: boolean | null;
+  hosting: boolean | null;
+  compromised: boolean | null;
+  scraper: boolean | null;
+  attackCount: number | null;
   network: string | null;
   operator: string | null;
   /** `listed` is null when the list gave no usable answer. */
@@ -149,6 +162,7 @@ export type Quality = {
 
 /** Looked up on request only, always through the server. */
 export type ConnectionInfo = {
+  exitIp: string;
   exit: Geo[];
   trace: { ip: string; country: string | null; colo: string | null } | null;
   /** Where the connection enters: the server address xray dials. */
@@ -183,8 +197,16 @@ const backend: Backend = "__TAURI_INTERNALS__" in window || !import.meta.env.DEV
 
 export const api = {
   getState: () => backend.call<{ groups: Group[]; profiles: Profile[]; settings: Settings }>("get_state"),
-  importLinks: (text: string, groupId: string) =>
-    backend.call<{ added: number; errors: string[] }>("import_links", { text, groupId }),
+  importLinks: (text: string, groupId: string, newGroupName?: string) =>
+    backend.call<{ groupId: string; added: number; errors: string[] }>("import_links", { text, groupId, newGroupName }),
+  updateProfile: (id: string, patch: { name?: string; starred?: boolean }) =>
+    backend.call<void>("update_profile", { id, ...patch }),
+  moveLibraryItem: (kind: LibraryKind, id: string, earlier: boolean, targetId?: string) =>
+    backend.call<void>("move_library_item", { kind, id, earlier, targetId }),
+  setGroupSort: (id: string, byDelay: boolean) =>
+    backend.call<void>("set_group_sort", { id, byDelay }),
+  exportLibraryItem: (kind: LibraryKind, id: string) =>
+    backend.call<string>("export_library_item", { kind, id }),
   deleteProfile: (id: string) => backend.call<void>("delete_profile", { id }),
   createGroup: (name: string) => backend.call<string>("create_group", { name }),
   updateGroup: (id: string, name: string, url?: string, autoUpdate?: boolean) =>
@@ -193,7 +215,7 @@ export const api = {
   addSubscription: (url: string) => backend.call<SubscriptionResult>("add_subscription", { url }),
   updateSubscription: (id: string) => backend.call<SubscriptionResult>("update_subscription", { id }),
   /** Returns the settings as saved (split tunnel entries cleaned up). */
-  updateSettings: (settings: Settings) => backend.call<Settings>("update_settings", { settings }),
+  updateSettings: (patch: Partial<Settings>) => backend.call<Settings>("update_settings", { patch }),
   runningApps: () => backend.call<RunningApp[]>("running_apps"),
   connect: (id: string) => backend.call<Session>("connect", { id }),
   disconnect: () => backend.call<void>("disconnect"),

@@ -7,6 +7,8 @@ export const DEFAULT_SETTINGS: Settings = {
   selected: null,
   autoConnect: false,
   killSwitch: true,
+  absoluteMode: false,
+  absoluteTimezone: "",
   autoReconnect: true,
   bypassLan: true,
   iranDirect: false,

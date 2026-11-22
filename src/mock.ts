@@ -17,15 +17,17 @@ const make = (name: string, protocol: Profile["protocol"], network: string, secu
   address: `server${nextId}.example.com`,
   port: 443,
   groupId,
+  starred: false,
   stream: { network, security },
   insecure: security === "none" && protocol !== "shadowsocks" ? "unencrypted" : null,
 });
 
 let groups: Group[] = [
-  { id: "default", name: "My servers", subscription: null },
+  { id: "default", name: "My servers", subscription: null, sortByDelay: false },
   {
     id: "sub1",
     name: "FastNet",
+    sortByDelay: false,
     subscription: {
       url: "https://panel.example.com/sub/abc",
       autoUpdate: true,
@@ -79,21 +81,50 @@ let session: Session | null =
 const logs: string[] = [];
 
 const blocked = params.get("demo") === "blocked";
-const mockStatus = () => ({ session, firewall: !!session?.killSwitch || blocked, blocked: blocked && !session, xrayFound: true, tunFound: true, elevated: true, coreError: null });
+const mockStatus = () => ({ session, absoluteSupported: true, absolute: {phase: settings.absoluteMode ? (session ? "active" : "armed") : "off", timezone: settings.absoluteMode && session ? (settings.absoluteTimezone || "America/Toronto") : null, exitIp: session?.exit?.ip ?? null, error: null}, firewall: settings.absoluteMode || !!session?.killSwitch || blocked, blocked: (settings.absoluteMode || blocked) && !session, xrayFound: true, tunFound: true, elevated: true, coreError: null });
 
 const handlers: Record<string, (args: Record<string, any>) => unknown> = {
   get_state: () => ({ groups, profiles, settings }),
-  import_links: ({ text, groupId }) => {
+  import_links: ({ text, groupId, newGroupName }) => {
     const links = String(text).split(/\s+/).filter((l) => l.includes("://"));
+    if (links.length && newGroupName) {
+      groupId = `g${nextId++}`;
+      groups = [...groups, { id: groupId, name: newGroupName, subscription: null, sortByDelay: false }];
+    }
     profiles = [...profiles, ...links.map((_, i) => make(`Imported ${i + 1}`, "vless", "ws", "tls", groupId))];
-    return { added: links.length, errors: [] };
+    return { groupId, added: links.length, errors: [] };
+  },
+  update_profile: ({ id, name, starred }) => {
+    profiles = profiles.map((p) => p.id === id ? { ...p, name: name ?? p.name, starred: starred ?? p.starred } : p);
+  },
+  set_group_sort: ({ id, byDelay }) => {
+    groups = groups.map((g) => g.id === id ? { ...g, sortByDelay: byDelay } : g);
+  },
+  move_library_item: ({ kind, id, earlier, targetId }) => {
+    const list = kind === "group" ? groups : profiles;
+    const profile = profiles.find((p) => p.id === id);
+    const positions = list.map((item, index) => ({ item, index })).filter(({ item }) =>
+      kind === "group" || ("starred" in item && item.groupId === profile?.groupId && item.starred === profile?.starred));
+    const index = positions.findIndex(({ item }) => item.id === id);
+    const to = targetId ? positions.findIndex(({ item }) => item.id === targetId) : index + (earlier ? -1 : 1);
+    if (index < 0 || !positions[to]) return;
+    const reordered = positions.map(({ item }) => item);
+    reordered.splice(to, 0, reordered.splice(index, 1)[0]);
+    const byPosition = new Map(positions.map(({ index }, i) => [index, reordered[i]]));
+    if (kind === "group") groups = groups.map((item, i) => (byPosition.get(i) as Group) ?? item);
+    else profiles = profiles.map((item, i) => (byPosition.get(i) as Profile) ?? item);
+  },
+  export_library_item: ({ kind, id }) => {
+    const data = profiles.filter((p) => kind === "group" ? p.groupId === id : p.id === id)
+      .map((p) => ({ remarks: p.name, outbounds: [{ protocol: "trojan", settings: { address: p.address, port: p.port, password: "demo" } }] }));
+    return JSON.stringify(kind === "group" ? data : data[0], null, 2);
   },
   delete_profile: ({ id }) => {
     profiles = profiles.filter((p) => p.id !== id);
   },
   create_group: ({ name }) => {
     const id = `g${nextId++}`;
-    groups = [...groups, { id, name, subscription: null }];
+    groups = [...groups, { id, name, subscription: null, sortByDelay: false }];
     return id;
   },
   update_group: ({ id, name, url, autoUpdate }) => {
@@ -124,6 +155,7 @@ const handlers: Record<string, (args: Record<string, any>) => unknown> = {
       {
         id,
         name: new URL(url).host,
+        sortByDelay: false,
         subscription: { url, autoUpdate: true, intervalHours: 12, updatedAt: Date.now(), lastError: null, upload: null, download: 0, total: null, expire: null },
       },
     ];
@@ -135,7 +167,9 @@ const handlers: Record<string, (args: Record<string, any>) => unknown> = {
     groups = groups.map((g) => (g.id === id && g.subscription ? { ...g, subscription: { ...g.subscription, updatedAt: Date.now() } } : g));
     return { groupId: id, count: profiles.filter((p) => p.groupId === id).length, skipped: 0 };
   },
-  update_settings: ({ settings: s }) => {
+  update_settings: ({ patch }) => {
+    const s = { ...settings, ...patch };
+    if (s.absoluteMode !== settings.absoluteMode || (s.absoluteMode && s.absoluteTimezone !== settings.absoluteTimezone)) session = null;
     if (s.tunMtu < 1280 || s.tunMtu > 9000) throw "MTU must be between 1280 and 9000.";
     const bad = s.split.sites.find((x: string) => !/^[\w.:/-]+\.[\w.:/-]+$/.test(x.replace(/^https?:\/\//, "")));
     if (bad) throw `"${bad}" isn't a valid site, IP or IP range.`;
@@ -154,11 +188,12 @@ const handlers: Record<string, (args: Record<string, any>) => unknown> = {
     ];
   },
   connect: async ({ id }) => {
+    if (settings.absoluteMode && profiles.find((p) => p.id === id)?.insecure) throw "Absolute requires an encrypted connection with verified security.";
     await wait(900);
     const port = () => 49152 + Math.floor(Math.random() * 10000);
     session = {
       profileId: id,
-      mode: settings.mode,
+      mode: settings.absoluteMode ? "tun" : settings.mode,
       socksPort: settings.fixedPorts ? settings.socksPort : port(),
       httpPort: settings.fixedPorts ? settings.httpPort : port(),
       startedAt: Date.now(),
@@ -166,7 +201,7 @@ const handlers: Record<string, (args: Record<string, any>) => unknown> = {
       health: null,
       exit: null,
       reconnects: 0,
-      killSwitch: settings.killSwitch,
+      killSwitch: settings.absoluteMode || settings.killSwitch,
       traffic: { upSpeed: 0, downSpeed: 0, upTotal: 0, downTotal: 0 },
     };
     setTimeout(() => {
@@ -218,26 +253,32 @@ const handlers: Record<string, (args: Record<string, any>) => unknown> = {
     return {
       exit: [
         { ...exit, source: "ipapi.co", country: "DE", city: "Neu-Isenburg" },
-        { ...exit, source: "DB-IP", country: "DE", city: "Frankfurt am Main", asn: null, org: null, latitude: null, longitude: null },
+        { ...exit, source: "IPQuery", country: "DE", city: "Frankfurt am Main" },
         { ...exit, source: "FreeIPAPI", country: "DE", city: "Frankfurt am Main", proxy: false },
       ],
       trace: { ip: "203.0.113.24", country: "DE", colo: "FRA" },
+      exitIp: "203.0.113.24",
       entry: {
         address: profiles.find((p) => p.id === session?.profileId)?.address ?? "server.example.com",
         ip: "198.51.100.7",
         public: true,
         geo: [
           { source: "ipapi.co", ip: "198.51.100.7", country: "AE", region: "Dubai", city: "Dubai", asn: "AS64501", org: "Example Telecom", proxy: null, latitude: 25.2, longitude: 55.3, error: null },
-          { source: "FreeIPAPI", ip: null, country: null, region: null, city: null, asn: null, org: null, proxy: null, latitude: null, longitude: null, error: "Rate limited, try later" },
+          { source: "IPQuery", ip: null, country: null, region: null, city: null, asn: null, org: null, proxy: null, latitude: null, longitude: null, error: "Rate limited, try later" },
         ],
       },
       quality: {
         score: 50,
+        scoreSource: "IPQuery",
+        risk: 50,
+        confidence: 95,
         vpn: true,
         proxy: false,
         tor: false,
         hosting: true,
         compromised: false,
+        scraper: null,
+        attackCount: 3,
         network: "Hosting",
         operator: null,
         blocklists: [

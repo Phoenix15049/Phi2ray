@@ -4,6 +4,7 @@
 #[cfg(all(windows, not(debug_assertions), not(feature = "embed-cores")))]
 compile_error!("Release builds must embed the cores: use `npm run build:exe`.");
 
+mod absolute;
 mod config;
 mod connection;
 mod console;
@@ -74,6 +75,8 @@ impl Paths {
 type FileStamp = (Option<SystemTime>, u64);
 
 pub(crate) struct AppState {
+    absolute: Mutex<absolute::Status>,
+    absolute_guard: Mutex<Option<std::process::Child>>,
     store: Mutex<Store>,
     core: Mutex<Core>,
     link: Mutex<Option<Link>>,
@@ -102,6 +105,8 @@ struct Snapshot {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Status {
+    absolute: absolute::Status,
+    absolute_supported: bool,
     session: Option<Session>,
     /// The kill switch firewall is active.
     firewall: bool,
@@ -116,6 +121,7 @@ struct Status {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ImportResult {
+    group_id: String,
     added: usize,
     errors: Vec<String>,
 }
@@ -164,46 +170,169 @@ fn get_state(state: State<AppState>) -> Snapshot {
 // ---------- Servers and groups ----------
 
 #[tauri::command]
-fn import_links(state: State<AppState>, text: String, group_id: String) -> Result<ImportResult, String> {
-    add_links(&state, &text, &group_id)
+async fn import_links(app: AppHandle, text: String, group_id: String, new_group_name: Option<String>) -> Result<ImportResult, String> {
+    blocking(app, move |_, state| import_into(state, &text, &group_id, new_group_name.as_deref())).await?
 }
 
 pub(crate) fn add_links(state: &AppState, text: &str, group_id: &str) -> Result<ImportResult, String> {
+    import_into(state, text, group_id, None)
+}
+
+fn edit_library<T>(state: &AppState, edit: impl FnOnce(&mut Store) -> Result<T, String>) -> Result<T, String> {
     let mut store = state.store.lock().unwrap();
-    match store.group(group_id) {
-        None => return Err("That group no longer exists.".into()),
-        Some(g) if g.subscription.is_some() => {
-            return Err("Servers can't be added to a subscription; they'd be replaced on the next update.".into())
-        }
-        _ => {}
-    }
+    let mut updated = store.clone();
+    let result = edit(&mut updated)?;
+    updated.save(&state.paths.store)?;
+    *store = updated;
+    Ok(result)
+}
+
+fn import_into(state: &AppState, text: &str, group_id: &str, new_group_name: Option<&str>) -> Result<ImportResult, String> {
+    let name = new_group_name.map(clean_name).transpose()?;
     let parser::Parsed { mut profiles, errors, .. } = parser::parse_many(text);
-    for p in &mut profiles {
-        p.group_id = group_id.to_string();
-    }
     let added = profiles.len();
-    store.profiles.extend(profiles);
-    store.fix_selection();
-    store.save(&state.paths.store)?;
-    Ok(ImportResult { added, errors })
+    if added == 0 {
+        return Ok(ImportResult { group_id: group_id.into(), added, errors });
+    }
+    edit_library(state, |store| {
+        let group_id = if let Some(name) = name {
+            let id = new_id();
+            store.groups.push(Group { id: id.clone(), name, subscription: None, sort_by_delay: false });
+            id
+        } else {
+            store.group(group_id).ok_or("That group no longer exists.")?;
+            group_id.into()
+        };
+        for p in &mut profiles {
+            p.group_id = group_id.clone();
+            p.library.local = true;
+        }
+        store.profiles.extend(profiles);
+        store.fix_selection();
+        Ok(ImportResult { group_id, added, errors })
+    })
 }
 
 #[tauri::command]
 fn delete_profile(state: State<AppState>, id: String) -> Result<(), String> {
-    let mut store = state.store.lock().unwrap();
-    store.profiles.retain(|p| p.id != id);
-    store.fix_selection();
-    store.save(&state.paths.store)
+    edit_library(&state, |store| {
+        let Some(profile) = store.profiles.iter().find(|p| p.id == id) else { return Ok(()) };
+        if !profile.library.local && store.group(&profile.group_id).is_some_and(|g| g.subscription.is_some()) {
+            let fingerprint = subscription::fingerprint(profile);
+            let group_id = profile.group_id.clone();
+            let another_copy = store.profiles.iter().any(|p| p.id != id && p.group_id == group_id &&
+                !p.library.local && subscription::fingerprint(p) == fingerprint);
+            if !another_copy { store.hidden_profiles.entry(group_id).or_default().insert(fingerprint); }
+        }
+        store.profiles.retain(|p| p.id != id);
+        store.fix_selection();
+        Ok(())
+    })
+}
+
+#[tauri::command]
+fn update_profile(state: State<AppState>, id: String, name: Option<String>, starred: Option<bool>) -> Result<(), String> {
+    let name = name.as_deref().map(clean_name).transpose()?;
+    edit_library(&state, |store| {
+        let profile = store.profiles.iter_mut().find(|p| p.id == id).ok_or("Server no longer exists.")?;
+        if let Some(name) = name {
+            profile.name = name;
+            profile.library.custom_name = true;
+        }
+        if let Some(starred) = starred { profile.library.starred = starred; }
+        Ok(())
+    })
+}
+
+#[derive(Clone, Copy, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum LibraryKind { Group, Profile }
+
+fn move_in_list<T>(
+    list: &mut [T], index: usize, earlier: bool, target: Option<usize>, eligible: impl Fn(&T) -> bool,
+) -> Result<(), String> {
+    let positions: Vec<_> = list.iter().enumerate().filter_map(|(i, item)| eligible(item).then_some(i)).collect();
+    let from = positions.iter().position(|&i| i == index).ok_or("Item cannot be moved.")?;
+    let to = match target {
+        Some(index) => positions.iter().position(|&i| i == index).ok_or("Item cannot be moved to that position.")?,
+        None if earlier => from.saturating_sub(1),
+        None => (from + 1).min(positions.len() - 1),
+    };
+    if from < to {
+        for pair in positions[from..=to].windows(2) { list.swap(pair[0], pair[1]); }
+    } else {
+        for pair in positions[to..=from].windows(2).rev() { list.swap(pair[0], pair[1]); }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn move_library_item(state: State<AppState>, kind: LibraryKind, id: String, earlier: bool, target_id: Option<String>) -> Result<(), String> {
+    edit_library(&state, |store| {
+        match kind {
+            LibraryKind::Group => {
+                let index = store.groups.iter().position(|g| g.id == id).ok_or("Group no longer exists.")?;
+                let target = target_id.as_ref().map(|id| store.groups.iter().position(|g| &g.id == id).ok_or("Group no longer exists.")).transpose()?;
+                move_in_list(&mut store.groups, index, earlier, target, |_| true)?;
+            }
+            LibraryKind::Profile => {
+                let index = store.profiles.iter().position(|p| p.id == id).ok_or("Server no longer exists.")?;
+                let profile = &store.profiles[index];
+                if store.group(&profile.group_id).is_some_and(|g| g.sort_by_delay) {
+                    return Err("Turn off delay sorting to change the manual order.".into());
+                }
+                let (group_id, starred) = (profile.group_id.clone(), profile.library.starred);
+                let target = target_id.as_ref().map(|id| store.profiles.iter().position(|p| &p.id == id).ok_or("Server no longer exists.")).transpose()?;
+                move_in_list(&mut store.profiles, index, earlier, target, |p| p.group_id == group_id && p.library.starred == starred)?;
+            }
+        }
+        Ok(())
+    })
+}
+
+#[cfg(test)]
+#[test]
+fn moving_through_a_partition_keeps_other_items_in_place() {
+    let mut list = ['a', 'x', 'b', 'y', 'c'];
+    let eligible = |ch: &char| *ch <= 'c';
+    move_in_list(&mut list, 0, false, Some(4), eligible).unwrap();
+    assert_eq!(list, ['b', 'x', 'c', 'y', 'a']);
+    assert!(move_in_list(&mut list, 4, true, Some(1), eligible).is_err());
+    move_in_list(&mut list, 4, true, None, eligible).unwrap();
+    assert_eq!(list, ['b', 'x', 'a', 'y', 'c']);
+}
+
+#[tauri::command]
+fn set_group_sort(state: State<AppState>, id: String, by_delay: bool) -> Result<(), String> {
+    edit_library(&state, |store| {
+        store.group_mut(&id).ok_or("Group no longer exists.")?.sort_by_delay = by_delay;
+        Ok(())
+    })
+}
+
+#[tauri::command]
+fn export_library_item(state: State<AppState>, kind: LibraryKind, id: String) -> Result<String, String> {
+    let store = state.store.lock().unwrap();
+    let export = match kind {
+        LibraryKind::Profile => config::for_export(store.profiles.iter().find(|p| p.id == id).ok_or("Server no longer exists.")?),
+        LibraryKind::Group => {
+            store.group(&id).ok_or("Group no longer exists.")?;
+            let profiles: Vec<_> = store.profiles.iter().filter(|p| p.group_id == id).map(config::for_export).collect();
+            if profiles.is_empty() { return Err("This group has no servers to export.".into()); }
+            serde_json::Value::Array(profiles)
+        }
+    };
+    serde_json::to_string_pretty(&export).map_err(|_| "Could not export the configuration.".into())
 }
 
 #[tauri::command]
 fn create_group(state: State<AppState>, name: String) -> Result<String, String> {
     let name = clean_name(&name)?;
-    let mut store = state.store.lock().unwrap();
-    let id = new_id();
-    store.groups.push(Group { id: id.clone(), name, subscription: None });
-    store.save(&state.paths.store)?;
-    Ok(id)
+    edit_library(&state, |store| {
+        let id = new_id();
+        store.groups.push(Group { id: id.clone(), name, subscription: None, sort_by_delay: false });
+        Ok(id)
+    })
 }
 
 #[tauri::command]
@@ -215,22 +344,22 @@ fn update_group(
     auto_update: Option<bool>,
 ) -> Result<(), String> {
     let name = clean_name(&name)?;
-    let mut store = state.store.lock().unwrap();
-    let group = store.group_mut(&id).ok_or("That group no longer exists.")?;
-    group.name = name;
-    if let Some(sub) = group.subscription.as_mut() {
-        if let Some(url) = url {
-            let url = url.trim().to_string();
-            url::Url::parse(&url).map_err(|_| "That doesn't look like a valid link.")?;
-            sub.url = url;
+    edit_library(&state, |store| {
+        let group = store.group_mut(&id).ok_or("That group no longer exists.")?;
+        group.name = name;
+        if let Some(sub) = group.subscription.as_mut() {
+            if let Some(url) = url {
+                let url = url.trim().to_string();
+                let parsed = url::Url::parse(&url).map_err(|_| "That doesn't look like a valid link.")?;
+                if !matches!(parsed.scheme(), "https" | "http") { return Err("Subscription links must use HTTPS or HTTP.".into()); }
+                if sub.url != url { sub.updated_at = None; }
+                sub.url = url;
+            }
+            if let Some(auto) = auto_update { sub.auto_update = auto; }
+            sub.enforce_policy();
         }
-        if let Some(auto) = auto_update {
-            sub.auto_update = auto;
-        }
-        // Applies to every change, including an https link edited into an http one.
-        sub.enforce_policy();
-    }
-    store.save(&state.paths.store)
+        Ok(())
+    })
 }
 
 #[tauri::command]
@@ -238,11 +367,13 @@ fn delete_group(state: State<AppState>, id: String) -> Result<(), String> {
     if id == DEFAULT_GROUP {
         return Err("The default group can't be deleted.".into());
     }
-    let mut store = state.store.lock().unwrap();
-    store.groups.retain(|g| g.id != id);
-    store.profiles.retain(|p| p.group_id != id);
-    store.fix_selection();
-    store.save(&state.paths.store)
+    edit_library(&state, |store| {
+        store.groups.retain(|g| g.id != id);
+        store.hidden_profiles.remove(&id);
+        store.profiles.retain(|p| p.group_id != id);
+        store.fix_selection();
+        Ok(())
+    })
 }
 
 #[tauri::command]
@@ -267,12 +398,15 @@ pub(crate) async fn add_subscription_url(app: &AppHandle, url: &str) -> Result<S
     let (count, skipped) = (fetched.profiles.len(), fetched.skipped);
     apply_fetched(&mut sub, &fetched);
 
-    let mut store = state.store.lock().unwrap();
-    store.profiles.extend(subscription::merge(&[], fetched.profiles, &id));
-    store.groups.push(Group { id: id.clone(), name: clean_name(&name).unwrap_or_else(|_| "Subscription".into()), subscription: Some(sub) });
-    store.fix_selection();
-    store.save(&state.paths.store)?;
-    Ok(SubscriptionResult { group_id: id, count, skipped })
+    edit_library(&state, |store| {
+        if store.groups.iter().any(|g| g.subscription.as_ref().is_some_and(|current| current.url == sub.url)) {
+            return Err("This subscription is already added.".into());
+        }
+        store.profiles.extend(subscription::merge(&[], fetched.profiles, &id));
+        store.groups.push(Group { id: id.clone(), name: clean_name(&name).unwrap_or_else(|_| "Subscription".into()), subscription: Some(sub), sort_by_delay: false });
+        store.fix_selection();
+        Ok(SubscriptionResult { group_id: id, count, skipped })
+    })
 }
 
 #[tauri::command]
@@ -291,29 +425,27 @@ async fn refresh_subscription(app: &AppHandle, id: &str) -> Result<SubscriptionR
     };
     let fetched = subscription::fetch(&url, proxy_port(&state).as_ref()).await;
 
-    let mut store = state.store.lock().unwrap();
-    let old: Vec<Profile> = store.profiles.iter().filter(|p| p.group_id == id).cloned().collect();
-    let sub = store
-        .group_mut(id)
-        .and_then(|g| g.subscription.as_mut())
-        .ok_or("This group was removed during the update.")?;
-    let result = match fetched {
-        Err(e) => {
-            sub.last_error = Some(e.clone());
-            Err(e)
-        }
-        Ok(fetched) => {
-            apply_fetched(sub, &fetched);
-            let (count, skipped) = (fetched.profiles.len(), fetched.skipped);
-            let merged = subscription::merge(&old, fetched.profiles, id);
-            store.profiles.retain(|p| p.group_id != id);
-            store.profiles.extend(merged);
-            store.fix_selection();
-            Ok(SubscriptionResult { group_id: id.to_string(), count, skipped })
-        }
-    };
-    store.save(&state.paths.store)?;
-    result
+    edit_library(&state, |store| {
+        let sub = store.group_mut(id).and_then(|g| g.subscription.as_mut()).ok_or("This group was removed during the update.")?;
+        if sub.url != url { return Err("The subscription link changed during the update. Refresh it again.".into()); }
+        let fetched = match fetched {
+            Ok(fetched) => fetched,
+            Err(error) => {
+                sub.last_error = Some(error.clone());
+                return Ok(Err(error));
+            }
+        };
+        apply_fetched(sub, &fetched);
+        let hidden = store.hidden_profiles.get(id).filter(|hidden| !hidden.is_empty());
+        let fresh = fetched.profiles.into_iter().filter(|p| hidden.is_none_or(|hidden| !hidden.contains(&subscription::fingerprint(p)))).collect();
+        let old: Vec<Profile> = store.profiles.iter().filter(|p| p.group_id == id).cloned().collect();
+        let merged = subscription::merge(&old, fresh, id);
+        let count = merged.len();
+        store.profiles.retain(|p| p.group_id != id);
+        store.profiles.extend(merged);
+        store.fix_selection();
+        Ok(Ok(SubscriptionResult { group_id: id.to_string(), count, skipped: fetched.skipped }))
+    })?
 }
 
 fn apply_fetched(sub: &mut Subscription, f: &subscription::Fetched) {
@@ -367,21 +499,62 @@ fn proxy_port(state: &AppState) -> Option<probe::LocalProxy> {
 // ---------- Settings ----------
 
 #[tauri::command]
-async fn update_settings(app: AppHandle, settings: Settings) -> Result<Settings, String> {
-    blocking(app, move |app, state| save_settings(app, state, settings)).await?
+async fn update_settings(app: AppHandle, patch: serde_json::Map<String, serde_json::Value>) -> Result<Settings, String> {
+    let retry_absolute = patch.get("absoluteMode").and_then(serde_json::Value::as_bool) == Some(false);
+    blocking(app, move |app, state| edit_settings(app, state, retry_absolute, |settings| {
+        *settings = settings.patched(patch)?;
+        Ok(())
+    }))
+    .await?
 }
 
 /// Checks, applies and saves new settings. Blocking: changing the kill switch or console
 /// control can take a moment. Returns the cleaned-up version (e.g. canonical split tunnel
 /// entries).
-pub(crate) fn save_settings(app: &AppHandle, state: &AppState, mut settings: Settings) -> Result<Settings, String> {
+pub(crate) fn edit_settings(
+    app: &AppHandle,
+    state: &AppState,
+    retry_absolute: bool,
+    edit: impl FnOnce(&mut Settings) -> Result<(), String>,
+) -> Result<Settings, String> {
+    // Share the connection lock so no connect/disconnect observes a half-applied update.
+    let _guard = state.switching.lock().unwrap();
+    let mut settings = state.store.lock().unwrap().settings.clone();
+    let previous = settings.clone();
+    edit(&mut settings)?;
     settings.validate()?;
     settings.split.normalize()?;
     let (kill_switch_changed, console_changed) = {
         let store = state.store.lock().unwrap();
         (store.settings.kill_switch != settings.kill_switch, store.settings.console != settings.console)
     };
-    if kill_switch_changed {
+    let absolute_changed = previous.absolute_mode != settings.absolute_mode;
+    let recovery_pending = !previous.absolute_mode &&
+        (absolute::marker(state).exists() || state.absolute.lock().unwrap().phase == "error");
+    let release_absolute = !settings.absolute_mode && (absolute_changed || (retry_absolute && recovery_pending));
+    if absolute_changed || release_absolute || (settings.absolute_mode && previous.absolute_timezone != settings.absolute_timezone) {
+        if settings.absolute_mode {
+            absolute::arm(state)?;
+            if let Err(e) = connection::absolute_barrier(state, &settings, false) {
+                absolute::phase(state, "error", Some(e.clone()));
+                return Err(e);
+            }
+            connection::teardown(state);
+            state.blocked.store(true, Ordering::SeqCst);
+        } else {
+            // Keep the barrier until all system state has been restored successfully.
+            if let Err(e) = connection::absolute_barrier(state, &settings, false) {
+                absolute::phase(state, "error", Some(e.clone()));
+                return Err(e);
+            }
+            connection::teardown(state);
+            state.blocked.store(true, Ordering::SeqCst);
+            if let Err(e) = absolute::restore_owned(state) {
+                absolute::phase(state, "error", Some(e.clone()));
+                return Err(e);
+            }
+        }
+    } else if kill_switch_changed && !settings.absolute_mode && !recovery_pending {
         connection::apply_kill_switch(state, &settings)?;
     }
     if console_changed {
@@ -391,7 +564,22 @@ pub(crate) fn save_settings(app: &AppHandle, state: &AppState, mut settings: Set
     state.logs.lock().unwrap().set_limit(settings.log_lines as usize);
     let mut store = state.store.lock().unwrap();
     store.settings = settings.clone();
-    store.save(&state.paths.store)?;
+    if let Err(e) = store.save(&state.paths.store) {
+        store.settings = previous;
+        drop(store);
+        if absolute_changed { absolute::phase(state,"error",Some("Settings could not be saved; traffic remains protected. Retry the change.".into())); }
+        return Err(e);
+    }
+    drop(store);
+    if release_absolute {
+        if let Err(e) = firewall::disable() {
+            absolute::phase(state, "error", Some(e.clone()));
+            state.blocked.store(firewall::is_active(), Ordering::SeqCst);
+            return Err(e);
+        }
+        absolute::phase(state, "off", None);
+        state.blocked.store(firewall::is_active(),Ordering::SeqCst);
+    }
     Ok(settings)
 }
 
@@ -423,10 +611,11 @@ async fn ping_dns(app: AppHandle, servers: Vec<String>) -> Result<Vec<Option<u32
 #[tauri::command]
 async fn quit_app(app: AppHandle) -> Result<(), String> {
     blocking(app, |app, state| {
-        connection::disconnect(state);
+        connection::shutdown(state)?;
         app.exit(0);
+        Ok(())
     })
-    .await
+    .await?
 }
 
 /// Running programs, for picking split tunnel apps.
@@ -472,6 +661,8 @@ async fn disconnect(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 async fn status(app: AppHandle) -> Result<Status, String> {
     blocking(app, |_, state| Status {
+        absolute: state.absolute.lock().unwrap().clone(),
+        absolute_supported: cfg!(windows),
         session: state.link.lock().unwrap().as_ref().map(|l| l.session.clone()),
         firewall: firewall::is_active(),
         blocked: state.blocked.load(Ordering::SeqCst),
@@ -508,8 +699,15 @@ async fn open_link(name: String) -> Result<(), String> {
 /// Only on request: it asks several outside services, so it never runs on its own.
 #[tauri::command]
 async fn connection_info(app: AppHandle) -> Result<netinfo::Report, String> {
-    let target = blocking(app, |_, state| connection::info_target(state)).await??;
-    netinfo::lookup(target).await
+    let (target, generation) = blocking(app.clone(), |_, state| {
+        let generation = state.generation.load(Ordering::SeqCst);
+        connection::info_target(state).map(|target| (target, generation))
+    }).await??;
+    let report = netinfo::lookup(target).await?;
+    if app.state::<AppState>().generation.load(Ordering::SeqCst) != generation {
+        return Err("The connection changed during the IP check. Try again.".into());
+    }
+    Ok(report)
 }
 
 #[tauri::command]
@@ -559,8 +757,17 @@ pub(crate) async fn run_delay_tests(
             let on_result = on_result.clone();
             tauri::async_runtime::spawn(async move {
                 let _permit = limit.acquire_owned().await;
-                let ms = delay::test(&exe, &assets, &p, &target).await;
-                let result = DelayResult { id: p.id, ms };
+                let id = p.id.clone();
+                let prepared = if p.protocol == parser::Protocol::Wireguard && p.address.parse::<std::net::IpAddr>().is_err() {
+                    blocking(app.clone(), move |_, state| {
+                        connection::resolve_server(state, &p.address, p.port).map(|ip| connection::pin_address(&p, ip))
+                    }).await.ok().and_then(Result::ok)
+                } else { Some(p) };
+                let ms = match prepared {
+                    Some(profile) => delay::test(&exe, &assets, &profile, &target).await,
+                    None => None,
+                };
+                let result = DelayResult { id, ms };
                 on_result(&result);
                 let _ = app.emit("delay", result);
             })
@@ -669,6 +876,7 @@ fn find_core_dir(app: &AppHandle) -> PathBuf {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    if absolute::watchdog_entry() { return; }
     // WebKitGTK draws an empty window with NVIDIA's driver unless this is off.
     #[cfg(not(windows))]
     if Path::new("/proc/driver/nvidia").exists() && std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
@@ -738,11 +946,15 @@ pub fn run() {
                     "[app] Phi2ray closed unexpectedly while the kill switch was on. The internet stays blocked until you reconnect or unblock.".into(),
                 );
             }
+            let recovery_error = absolute::recover(&paths.data.join("absolute-backup.json")).err();
             let store = Store::load(&paths.store);
+            let absolute_enabled = store.settings.absolute_mode;
             let core_error = core_error.or_else(|| {
                 store.locked.then(|| "Your saved servers are locked. Unlock your keyring and restart Phi2ray.".to_string())
             });
             app.manage(AppState {
+                absolute_guard: Mutex::new(None),
+                absolute: Mutex::new(absolute::Status {phase: if recovery_error.is_some() {"error"} else if absolute_enabled {"armed"} else {"off"}.into(), error: recovery_error, ..Default::default()}),
                 store: Mutex::new(store),
                 core: Mutex::new(Core::new(logs.clone())),
                 link: Mutex::new(None),
@@ -756,6 +968,16 @@ pub fn run() {
             });
             tauri::async_runtime::spawn(subscription_updater(app.handle().clone()));
             let settings = app.state::<AppState>().store.lock().unwrap().settings.clone();
+            if settings.absolute_mode {
+                let state = app.state::<AppState>();
+                if let Err(e) = connection::absolute_barrier(&state, &settings, false).and_then(|_| absolute::arm(&state)) {
+                    absolute::phase(&state, "error", Some(e.clone()));
+                    connection::log(&state, format!("[absolute] Startup protection failed: {e}"));
+                    // Do not start ordinary connections after a failed protected startup.
+                    state.store.lock().unwrap().settings.auto_connect = false;
+                }
+                state.blocked.store(firewall::is_active(), Ordering::SeqCst);
+            }
             apply_window_settings(app.handle(), &settings);
             app.state::<AppState>().logs.lock().unwrap().set_limit(settings.log_lines as usize);
             tray::create(app.handle())?;
@@ -782,6 +1004,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_state,
             import_links,
+            update_profile,
+            move_library_item,
+            set_group_sort,
+            export_library_item,
             delete_profile,
             create_group,
             update_group,
@@ -813,7 +1039,7 @@ pub fn run() {
         .run(|app, event| {
             if let RunEvent::Exit = event {
                 if let Some(state) = app.try_state::<AppState>() {
-                    connection::disconnect(&state);
+                    if let Err(e) = connection::shutdown(&state) { connection::log(&state, format!("[absolute] Exit recovery failed: {e}")); }
                 }
             }
         });

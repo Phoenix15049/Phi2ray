@@ -28,7 +28,29 @@ env:
   SING_BOX_VERSION: "1.14.4"
 
 jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+
+      - name: Check release versions and tag
+        run: node scripts/check-release-version.mjs
+
+      - name: Audit dependencies
+        run: |
+          cargo install cargo-audit --version 0.22.2 --locked
+          cargo audit --file src-tauri/Cargo.lock
+          cargo audit --file src-tauri/cli/Cargo.lock
+          cargo audit --file src-tauri/helper/Cargo.lock
+          npm audit --omit=dev --audit-level=high
+
   windows:
+    needs: checks
     runs-on: windows-latest
     permissions:
       actions: read # SignPath reads the unsigned artifact
@@ -41,33 +63,16 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 20
-
-      - name: Check the tag matches the app version
-        if: github.ref_type == 'tag'
-        shell: pwsh
-        env:
-          TAG: ${{ github.ref_name }}
-        run: |
-          $version = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
-          if ("v$version" -ne $env:TAG) { throw "Tag $env:TAG doesn't match the app version $version." }
-
-      - name: Audit dependencies
-        shell: bash
-        run: |
-          cargo install cargo-audit --version 0.22.2 --locked
-          cargo audit --file src-tauri/Cargo.lock
-          cargo audit --file src-tauri/cli/Cargo.lock
-          cargo audit --file src-tauri/helper/Cargo.lock
-          npm audit --omit=dev --audit-level=high
+          node-version: 22
 
       - name: Download and check the cores
         shell: pwsh
         run: |
           $tmp = Join-Path $env:RUNNER_TEMP cores
           New-Item -ItemType Directory $tmp | Out-Null
-          Invoke-WebRequest "https://github.com/XTLS/Xray-core/releases/download/v$env:XRAY_VERSION/Xray-windows-64.zip" -OutFile "$tmp/xray.zip"
-          Invoke-WebRequest "https://github.com/SagerNet/sing-box/releases/download/v$env:SING_BOX_VERSION/sing-box-$env:SING_BOX_VERSION-windows-amd64.zip" -OutFile "$tmp/sing-box.zip"
+          $download = @{ MaximumRetryCount = 3; RetryIntervalSec = 2; TimeoutSec = 120 }
+          Invoke-WebRequest "https://github.com/XTLS/Xray-core/releases/download/v$env:XRAY_VERSION/Xray-windows-64.zip" -OutFile "$tmp/xray.zip" @download
+          Invoke-WebRequest "https://github.com/SagerNet/sing-box/releases/download/v$env:SING_BOX_VERSION/sing-box-$env:SING_BOX_VERSION-windows-amd64.zip" -OutFile "$tmp/sing-box.zip" @download
           Expand-Archive "$tmp/xray.zip" "$tmp/xray"
           Expand-Archive "$tmp/sing-box.zip" "$tmp/sing-box"
           Get-ChildItem "$tmp/xray" -Recurse -Include xray.exe, geoip.dat, geosite.dat | Copy-Item -Destination src-tauri/core/
@@ -83,7 +88,7 @@ jobs:
 
       - name: Build
         run: |
-          npm ci
+          npm ci --no-audit
           npm run build:exe
 
       - name: Name the exe
@@ -100,14 +105,15 @@ jobs:
       # stay unsigned.
       - name: Upload the unsigned exe
         id: unsigned
-        if: github.ref_type == 'tag' && vars.SIGNPATH_PROJECT_SLUG != ''
+        if: github.event_name == 'push' && github.ref_type == 'tag' && vars.SIGNPATH_PROJECT_SLUG != ''
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: unsigned-windows-exe
           path: unsigned/
+          if-no-files-found: error
 
       - name: Sign the exe
-        if: github.ref_type == 'tag' && vars.SIGNPATH_PROJECT_SLUG != ''
+        if: github.event_name == 'push' && github.ref_type == 'tag' && vars.SIGNPATH_PROJECT_SLUG != ''
         uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3.0
         with:
           api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
@@ -140,8 +146,10 @@ jobs:
         with:
           name: phi2ray-windows-x64
           path: release/
+          if-no-files-found: error
 
   linux:
+    needs: checks
     # The oldest supported Ubuntu: what's built here also runs on anything newer.
     runs-on: ubuntu-22.04
     permissions:
@@ -152,20 +160,14 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 20
-
-      - name: Check the tag matches the app version
-        if: github.ref_type == 'tag'
-        env:
-          TAG: ${{ github.ref_name }}
-        run: |
-          version="$(jq -r .version src-tauri/tauri.conf.json)"
-          [ "v$version" = "$TAG" ] || { echo "Tag $TAG doesn't match the app version $version."; exit 1; }
+          node-version: 22
+          cache: npm
 
       - name: Install the build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf libfuse2 file rpm
+          sudo apt-get install -y build-essential libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
+            librsvg2-dev libxdo-dev libssl-dev patchelf libfuse2 file rpm unzip curl
 
       - name: Download and check the cores
         run: sh scripts/get-linux-cores.sh
@@ -175,7 +177,7 @@ jobs:
           # linuxdeploy's own strip can't read some newer libraries.
           NO_STRIP: "true"
         run: |
-          npm ci
+          npm ci --no-audit
           npm run build:linux
 
       - name: Name the packages
@@ -215,6 +217,7 @@ jobs:
         with:
           name: phi2ray-linux-x64
           path: release/
+          if-no-files-found: error
 
       - name: Keep the .deb as a file of its own
         continue-on-error: true
@@ -255,13 +258,11 @@ jobs:
           path: linux
       - name: Build the package
         run: |
-          pacman -Syu --noconfirm --needed base-devel jq
+          pacman -Syu --noconfirm --needed base-devel
           useradd --create-home builder
-          version="$(jq -r .version src-tauri/tauri.conf.json)"
           mkdir build
           cp packaging/arch/* build/
           cp linux/*.deb build/
-          sed -i "s/^pkgver=.*/pkgver=$version/" build/PKGBUILD
           chown -R builder build
           cd build
           su builder -c 'makepkg --nodeps --noconfirm'
@@ -269,6 +270,7 @@ jobs:
         with:
           name: phi2ray-arch-x64
           path: build/*.pkg.tar.zst
+          if-no-files-found: error
 
       - name: Keep the package as a file of its own
         continue-on-error: true
@@ -279,7 +281,7 @@ jobs:
 
   publish:
     needs: [windows, linux, arch]
-    if: ${{ !cancelled() && needs.windows.result == 'success' && needs.linux.result == 'success' }}
+    if: ${{ !cancelled() && github.event_name == 'push' && github.ref_type == 'tag' && needs.windows.result == 'success' && needs.linux.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write # draft release
@@ -308,27 +310,27 @@ jobs:
         if: github.event.repository.visibility == 'public'
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          subject-path: |
-            release/*.exe
-            release/*.deb
-            release/*.rpm
-            release/*.AppImage
-            release/*.pkg.tar.zst
+          subject-path: release/*
 
       - name: Draft the release
         if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
-          COMMIT: ${{ github.sha }}
           ATTESTED: ${{ github.event.repository.visibility == 'public' }}
           SIGNED: ${{ needs.windows.outputs.signed }}
           ARCH: ${{ needs.arch.result }}
         run: |
+          commit="$(git rev-parse HEAD)"
           base="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG"
+          changes="$(awk -v heading="## What's new in ${TAG#v}" '$0 == heading { section=1; next } /^## / && section { exit } section { print }' README.md)"
           {
-            echo "Built by GitHub Actions from commit $COMMIT."
+            echo "Built by GitHub Actions from commit $commit."
             echo
+            if [ -n "$changes" ]; then
+              echo "## What's new"
+              printf '%s\n\n' "$changes"
+            fi
             echo "Download only the file for your system:"
             echo
             echo "| Your system | File |"

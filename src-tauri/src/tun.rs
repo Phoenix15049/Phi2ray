@@ -61,6 +61,10 @@ pub fn build(t: &TunInput) -> Result<Value, String> {
         json!({ "ip_cidr": [server_cidr], "outbound": "direct" }),
     ];
     let mut dns_rules = Vec::new();
+    if s.absolute_mode {
+        // Capture IPv6, then reject it; changing DNS preference alone does not block IPv6.
+        route_rules.insert(4, json!({ "ip_cidr": ["::/0"], "action": "reject" }));
+    }
 
     // Split tunnel rules come right after the safety rules above, so they decide first.
     let mut final_outbound = "proxy";

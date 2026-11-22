@@ -36,6 +36,7 @@ type Props = {
   needsReconnect: boolean;
   covered: boolean;
   onChange: (patch: Partial<Settings>) => void;
+  onAbsoluteToggle: () => void;
   onModeChange: (mode: Mode) => void;
   onReconnect: () => void;
   onOpenSplit: () => void;
@@ -106,9 +107,15 @@ function SectionNav() {
   );
 }
 
+export function absoluteStatusLabel(phase: string): StringKey {
+  return phase === "off" ? "absoluteOff" : phase === "active" ? "absoluteActive" : phase === "error" ? "absoluteError" : "absolutePreparing";
+}
+
 export function SettingsSheet(p: Props) {
   const t = useT();
   const s = p.settings;
+  const [absoluteZone, setAbsoluteZone] = useState(s.absoluteTimezone);
+  useEffect(() => setAbsoluteZone(s.absoluteTimezone), [s.absoluteTimezone]);
   return (
     <Sheet title={t("settings")} onClose={p.onClose} covered={p.covered} subhead={<SectionNav />}>
       {p.needsReconnect && (
@@ -159,9 +166,9 @@ export function SettingsSheet(p: Props) {
           {modeOptions(t).map((m) => (
             <button
               key={m.id}
-              className={`choice ${s.mode === m.id ? "active" : ""}`}
+              className={`choice ${(s.absoluteMode ? "tun" : s.mode) === m.id ? "active" : ""}`}
               onClick={() => p.onModeChange(m.id)}
-              disabled={p.busy}
+              disabled={p.busy || s.absoluteMode}
             >
               <span className="choice-icon">{m.id === "tun" ? Icon.shield() : m.id === "system" ? Icon.globe() : Icon.plug()}</span>
               <span className="choice-text">
@@ -171,7 +178,7 @@ export function SettingsSheet(p: Props) {
                 </strong>
                 <span>{m.hint}</span>
               </span>
-              {s.mode === m.id && <span className="choice-check">{Icon.check()}</span>}
+              {(s.absoluteMode ? "tun" : s.mode) === m.id && <span className="choice-check">{Icon.check()}</span>}
             </button>
           ))}
         </div>
@@ -183,23 +190,61 @@ export function SettingsSheet(p: Props) {
       </Section>
 
       <Section id="protection">
+        {p.status.absoluteSupported && (
+          <div className="absolute-card">
+            <div className="absolute-card-head">
+              <span className="choice-icon">{Icon.shield(16)}</span>
+              <div>
+                <strong>{t("absoluteMode")}</strong>
+                <span className="absolute-state" data-phase={p.status.absolute.phase}>
+                  {t(absoluteStatusLabel(p.status.absolute.phase))}
+                </span>
+              </div>
+              <Switch checked={s.absoluteMode} onChange={p.onAbsoluteToggle} label={t("absoluteMode")} disabled={p.busy} />
+            </div>
+            <ul className="absolute-benefits">
+              <li>{Icon.lock(14)}<span>{t("absoluteTraffic")}</span></li>
+              <li>{Icon.globe()}<span>{t("absoluteClock")}</span></li>
+            </ul>
+            {p.status.absolute.timezone && <div className="absolute-current">
+              <span>{t("absoluteAppliedZone")}</span><bdi>{p.status.absolute.timezone}</bdi>
+            </div>}
+            <label className="absolute-zone">
+              <span>{t("absoluteZone")}</span>
+              <input className="input ltr-input" value={absoluteZone} placeholder="Auto / America/Toronto" disabled={p.busy}
+                onChange={(e) => setAbsoluteZone(e.target.value)} onBlur={() => {
+                  const value = absoluteZone.trim();
+                  if (value !== s.absoluteTimezone) p.onChange({ absoluteTimezone: value });
+                }} />
+            </label>
+            {p.status.absolute.error && <div className="alert danger absolute-error" role="alert">
+              <span dir="auto">{p.status.absolute.error}</span>
+              {!s.absoluteMode && <button className="btn small" disabled={p.busy} onClick={p.onAbsoluteToggle}>{t("absoluteRestore")}</button>}
+            </div>}
+            <details className="absolute-details">
+              <summary>{t("absoluteDetails")}</summary>
+              <p>{t("absoluteRecovery")}</p>
+              <p>{t("absoluteLimits")}</p>
+            </details>
+          </div>
+        )}
         <Group>
           <Row icon={Icon.lock(18)} title={t("killSwitch")} hint={t("killSwitchHint")}>
-            <Switch checked={s.killSwitch} onChange={(v) => p.onChange({ killSwitch: v })} label={t("killSwitch")} />
+            <Switch checked={s.absoluteMode || s.killSwitch} onChange={(v) => p.onChange({ killSwitch: v })} label={t("killSwitch")} disabled={s.absoluteMode} />
           </Row>
           <Row icon={Icon.refresh()} title={t("autoReconnect")} hint={t("autoReconnectHint")}>
-            <Switch checked={s.autoReconnect} onChange={(v) => p.onChange({ autoReconnect: v })} label={t("autoReconnect")} />
+            <Switch checked={s.absoluteMode || s.autoReconnect} onChange={(v) => p.onChange({ autoReconnect: v })} label={t("autoReconnect")} disabled={s.absoluteMode} />
           </Row>
         </Group>
       </Section>
 
       <Section id="splitTunnel">
-        <button className="nav-row" onClick={p.onOpenSplit}>
+        <button className="nav-row" onClick={p.onOpenSplit} disabled={s.absoluteMode}>
           <span className="choice-icon">{Icon.split()}</span>
           <span className="row-text">
             <strong>{t("splitTunnel")}</strong>
             <span>
-              {!s.split.enabled
+              {!s.split.enabled || s.absoluteMode
                 ? t("splitOff")
                 : `${s.split.mode === "exclude" ? t("splitExclude") : t("splitInclude")} · ${s.split.apps.length} ${t("splitAppsCount")} · ${s.split.sites.length} ${t("splitSitesCount")}`}
             </span>
@@ -211,10 +256,10 @@ export function SettingsSheet(p: Props) {
       <Section id="routing">
         <Group>
           <Row icon={Icon.home()} title={t("bypassLan")} hint={t("bypassLanHint")}>
-            <Switch checked={s.bypassLan} onChange={(v) => p.onChange({ bypassLan: v })} label={t("bypassLan")} />
+            <Switch checked={!s.absoluteMode && s.bypassLan} onChange={(v) => p.onChange({ bypassLan: v })} label={t("bypassLan")} disabled={s.absoluteMode} />
           </Row>
           <Row icon={Icon.flag()} title={t("iranDirect")} hint={t("iranDirectHint")}>
-            <Switch checked={s.iranDirect} onChange={(v) => p.onChange({ iranDirect: v })} label={t("iranDirect")} />
+            <Switch checked={!s.absoluteMode && s.iranDirect} onChange={(v) => p.onChange({ iranDirect: v })} label={t("iranDirect")} disabled={s.absoluteMode} />
           </Row>
           <Row icon={Icon.ban()} title={t("blockAds")} hint={t("blockAdsHint")}>
             <Switch checked={s.blockAds} onChange={(v) => p.onChange({ blockAds: v })} label={t("blockAds")} />
@@ -226,10 +271,12 @@ export function SettingsSheet(p: Props) {
       </Section>
 
       <Section id="dns" hint={t("dnsHint")}>
-        <DnsPicker value={s.remoteDns} connected={!!p.status.session} onCommit={(remoteDns) => p.onChange({ remoteDns })} />
+        <fieldset disabled={s.absoluteMode} style={{border:0,padding:0,margin:0,minWidth:0}}>
+        <DnsPicker value={s.absoluteMode ? "https://1.1.1.1/dns-query" : s.remoteDns} connected={!!p.status.session} onCommit={(remoteDns) => p.onChange({ remoteDns })} />
+        </fieldset>
         <Group>
           <Row icon={Icon.globe()} title={t("ipv6")} hint={t("ipv6Hint")}>
-            <Switch checked={s.ipv6} onChange={(v) => p.onChange({ ipv6: v })} label={t("ipv6")} />
+            <Switch checked={!s.absoluteMode && s.ipv6} onChange={(v) => p.onChange({ ipv6: v })} label={t("ipv6")} disabled={s.absoluteMode} />
           </Row>
         </Group>
       </Section>
@@ -247,7 +294,7 @@ export function SettingsSheet(p: Props) {
             <NumberField label={t("mtu")} value={s.tunMtu} min={1280} max={9000} onCommit={(v) => p.onChange({ tunMtu: v })} />
           </Row>
           <Row icon={Icon.route()} title={t("strictRoute")} hint={t("strictRouteHint")}>
-            <Switch checked={s.strictRoute} onChange={(v) => p.onChange({ strictRoute: v })} label={t("strictRoute")} />
+            <Switch checked={s.absoluteMode || s.strictRoute} onChange={(v) => p.onChange({ strictRoute: v })} label={t("strictRoute")} disabled={s.absoluteMode} />
           </Row>
         </Group>
       </Section>

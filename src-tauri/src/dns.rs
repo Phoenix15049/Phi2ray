@@ -77,7 +77,7 @@ pub async fn resolve_bootstrap(name: &str, proxy: Option<&crate::probe::LocalPro
                 if !resp.status().is_success() {
                     return None;
                 }
-                let ips = a_records(&resp.bytes().await.ok()?);
+                let ips = a_records(&resp.bytes().await.ok()?)?;
                 (!ips.is_empty()).then_some(ips)
             };
             let _ = tx.send(ask.await).await;
@@ -99,25 +99,36 @@ pub async fn resolve_bootstrap(name: &str, proxy: Option<&crate::probe::LocalPro
 /// Asks whether `name` (an address on a DNS blocklist, like `4.3.2.1.bl.example.org`) is listed.
 /// Goes through `client`, so through the server. None when the list gave no usable answer.
 pub async fn blocklisted(client: &reqwest::Client, name: &str) -> Option<bool> {
-    let query = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(query_packet(name));
+    let packet = query_packet(name);
+    let query = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&packet);
     let url = format!("{}?dns={query}", BOOTSTRAP_DOH[0]);
-    let resp = client.get(url).header("accept", "application/dns-message").send().await.ok()?;
+    let mut resp = client.get(url).header("accept", "application/dns-message").send().await.ok()?;
     if !resp.status().is_success() {
         return None;
     }
-    blocklist_answer(&resp.bytes().await.ok()?)
+    let mut body = Vec::new();
+    while let Some(chunk) = resp.chunk().await.ok()? {
+        if body.len() + chunk.len() > 65_535 { return None; }
+        body.extend_from_slice(&chunk);
+    }
+    let question = packet.get(12..)?;
+    if body.get(0..2) != Some(&packet[0..2]) || body.get(4..6) != Some(&packet[4..6])
+        || !body.get(12..).is_some_and(|bytes| bytes.starts_with(question)) {
+        return None;
+    }
+    blocklist_answer(&body)
 }
 
 /// NXDOMAIN means not listed and a 127.x answer means listed. 127.255.x is how lists refuse
 /// public resolvers, which says nothing about the address.
 fn blocklist_answer(packet: &[u8]) -> Option<bool> {
-    if packet.len() < 12 || packet[2] & 0x80 == 0 {
+    if packet.len() < 12 || packet[2] & 0xfa != 0x80 {
         return None;
     }
     match packet[3] & 0x0F {
         3 => Some(false),
         0 => {
-            let ips = a_records(packet);
+            let ips = a_records(packet)?;
             if ips.iter().any(|ip| ip.octets()[1] == 255) {
                 return None;
             }
@@ -127,11 +138,11 @@ fn blocklist_answer(packet: &[u8]) -> Option<bool> {
     }
 }
 
-/// The IPv4 addresses (type A) in a DNS response; empty for errors or anything malformed.
-fn a_records(packet: &[u8]) -> Vec<std::net::Ipv4Addr> {
+/// The IPv4 addresses (type A) in a DNS response. A malformed message is unknown, not empty.
+fn a_records(packet: &[u8]) -> Option<Vec<std::net::Ipv4Addr>> {
     let mut ips = Vec::new();
     if !is_answer(packet) {
-        return ips;
+        return None;
     }
     let count = |i: usize| u16::from_be_bytes([packet[i], packet[i + 1]]) as usize;
     let (questions, answers) = (count(4), count(6));
@@ -150,20 +161,21 @@ fn a_records(packet: &[u8]) -> Vec<std::net::Ipv4Addr> {
     };
     let mut i = 12;
     for _ in 0..questions {
-        let Some(next) = skip_name(i) else { return Vec::new() };
-        i = next + 4;
+        i = skip_name(i)? + 4;
+        if i > packet.len() { return None; }
     }
     for _ in 0..answers {
-        let Some(next) = skip_name(i) else { break };
-        let Some(head) = packet.get(next..next + 10) else { break };
+        let next = skip_name(i)?;
+        let head = packet.get(next..next + 10)?;
         let (kind, len) = (u16::from_be_bytes([head[0], head[1]]), u16::from_be_bytes([head[8], head[9]]) as usize);
-        let Some(data) = packet.get(next + 10..next + 10 + len) else { break };
-        if kind == 1 && len == 4 {
+        let data = packet.get(next + 10..next + 10 + len)?;
+        if kind == 1 && head[2..4] == [0, 1] {
+            if len != 4 { return None; }
             ips.push(std::net::Ipv4Addr::new(data[0], data[1], data[2], data[3]));
         }
         i = next + 10 + len;
     }
-    ips
+    Some(ips)
 }
 
 /// A standard DNS query for the A record of `name`.
@@ -202,6 +214,10 @@ mod tests {
         assert_eq!(blocklist_answer(&answer([127, 0, 0, 2])), Some(true));
         assert_eq!(blocklist_answer(&answer([127, 255, 255, 254])), None);
         assert_eq!(blocklist_answer(&header(2, 0)), None);
+        assert_eq!(blocklist_answer(&header(0, 1)), None);
+        let mut truncated = answer([127, 0, 0, 2]);
+        truncated[2] |= 2;
+        assert_eq!(blocklist_answer(&truncated), None);
         assert_eq!(blocklist_answer(&[0; 4]), None);
     }
 
@@ -220,11 +236,11 @@ mod tests {
         p.extend_from_slice(&[1, b'a', 2, b'b', b'c', 0, 0, 1, 0, 1]);
         p.extend_from_slice(&[0xC0, 12, 0, 5, 0, 1, 0, 0, 0, 60, 0, 2, 0xC0, 12]);
         p.extend_from_slice(&[0xC0, 12, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 203, 0, 113, 7]);
-        assert_eq!(a_records(&p), vec![std::net::Ipv4Addr::new(203, 0, 113, 7)]);
+        assert_eq!(a_records(&p), Some(vec![std::net::Ipv4Addr::new(203, 0, 113, 7)]));
         // Truncated or garbage packets give nothing and never panic.
         for cut in 0..p.len() {
             let _ = a_records(&p[..cut]);
         }
-        assert!(a_records(&[0, 0, 0x81, 0x80, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0, 7]).is_empty());
+        assert!(a_records(&[0, 0, 0x81, 0x80, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0, 7]).is_none());
     }
 }

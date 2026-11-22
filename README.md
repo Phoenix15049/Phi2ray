@@ -40,6 +40,17 @@ So I wrote my own. [Xray-core](https://github.com/XTLS/Xray-core) handles the pr
 [sing-box](https://github.com/SagerNet/sing-box) the VPN adapter. Phi2ray is the small Rust app in
 between that sets them up safely, watches them, and stays out of your way.
 
+## What's new in 0.2.2
+
+- Import advanced Xray JSON and XHTTP profiles, plus single-peer WireGuard and compatible
+  TunSafe configs. Import standard Xray, share-link and WireGuard exports from NPV.
+- Manage groups and servers with context menus, favorites, per-group latency sorting,
+  animated drag reordering, and file or text import into a chosen group.
+- **Absolute on Windows** adds a confirmation shortcut and applies the exit-derived
+  timezone under the strict network policy, with restoration when disabled.
+- Connection info uses updated HTTPS geolocation providers and shows the source of
+  the exit-address risk score, with IPQuery as a fallback.
+
 ## Install
 
 Get the file for your system from the [latest release](https://github.com/Phoenix15049/Phi2ray/releases/latest).
@@ -93,7 +104,7 @@ time you open Phi2ray.
 
 ## First steps
 
-1. Click **Add**, then paste a link or your subscription URL.
+1. Click **Add**, then paste a link, Xray JSON, a WireGuard config or your subscription URL.
 2. Press the power button.
 
 That's it. Everything in Settings has a sensible default.
@@ -104,26 +115,80 @@ That's it. Everything in Settings has a sensible default.
 
 - `vless://`, `vmess://`, `trojan://` and `ss://` links, plus base64 lists, with REALITY, XHTTP,
   WebSocket, gRPC, HTTPUpgrade and TLS.
+- Xray JSON exports and standalone outbounds (VLESS, VMess, Trojan, Shadowsocks, HTTP, SOCKS and WireGuard),
+  including JSON arrays and base64 JSON subscriptions. XHTTP extra/download settings, VLESS
+  encryption and TLS certificate pins are preserved. Paste JSON in **Add → Links**.
 - Subscriptions that refresh by themselves and show your remaining data and days.
 - Three modes: **VPN** for the whole system, **System proxy** for apps that follow the system's
   proxy settings, and **Proxy only** if you'd rather point apps at it yourself.
 - A real test: it sends a request through each server, so a server that's up but not working
   shows as failed. Unsafe servers get a small ⚠.
 
+JSON imports take the proxy outbound; Phi2ray manages listeners, DNS, logging and routing itself.
+Chained/reverse proxies, external certificate files and transports removed from the bundled Xray
+are rejected explicitly. The bundled core requires verified TLS; self-signed servers need a
+`pinnedPeerCertSha256` pin instead of `allowInsecure`. Sing-box/Clash JSON or YAML, Hysteria2 and
+TUIC are not supported by this importer.
+
+**WireGuard, TunSafe and NPV**
+
+- Paste or choose a standard WireGuard or compatible TunSafe `.conf` under **Add → Links**.
+  Single-peer UDP client configs support IPv4/IPv6 addresses, AllowedIPs, DNS IPs, MTU,
+  preshared keys and keepalive. The config's DNS servers handle names resolved inside the
+  WireGuard outbound. VPN-mode DNS for system apps still follows Phi2ray's DNS settings.
+- System hooks, custom routing tables, TunSafe's TCP transport and other unsupported options
+  produce an import error. For peers with restricted AllowedIPs, use a delay/health URL
+  reachable through that peer. To reach a private subnet through WireGuard in VPN mode,
+  turn off **Local network outside the VPN**.
+  Absolute requires a full IPv4 route.
+- For NPV/NapsternetV use a supported standard share link, Xray JSON or WireGuard export
+  from the provider. Protected `.npv` files require a standard export from the provider.
+
 **Not leaking**
+
+- **Absolute (Windows).** An optional strict mode in Settings → Protection with its own status
+  badge. It rejects profiles marked unencrypted or unverified, requires whole-system VPN and
+  kill switch, suspends all direct bypasses, blocks
+  IPv6 user traffic and uses encrypted DNS through the tunnel. User traffic stays blocked while
+  the protected IPv4 exit and its estimated timezone are checked. Windows timezone, automatic
+  timezone adjustment and Windows location consent are backed up before changes. The timezone
+  follows the exit (or an explicit IANA override), with DST handled by Windows. Turning Absolute
+  off restores the saved Windows settings and normal routing preferences. Disconnecting alone
+  keeps the network blocked. A separate recovery process retries restoration after an app crash;
+  power loss may require recovery on the next launch. Absolute firewall rules persist across
+  reboots: open Phi2ray and disable Absolute to restore normal access. The app's normal Quit
+  restores Windows settings and releases the block.
+
+  Absolute does not isolate desktop applications, erase cached identifiers, conceal physical
+  adapter details from local programs, or guarantee anonymity. Restart sensitive apps after
+  activation. Exit geolocation is approximate and checked periodically; rotating exits cannot
+  guarantee one timezone for every request. Loopback, DHCP, IPv6 neighbour discovery, VPN
+  transport and the app's limited encrypted DNS bootstrap remain necessary exceptions. Windows
+  location consent does not control every third-party location provider.
+
+  Timezone mapping data and aliases come from Unicode CLDR 48 (`windowsZones.xml`,
+  `supplementalMetadata.xml`, `bcp47/timezone.xml`); see
+  [Unicode license](src-tauri/src/windows-time-zones.LICENSE).
 
 - **Kill switch.** Firewall rules let nothing out except the tunnel, even while it reconnects or
   switches servers. If Phi2ray crashes the block stays, so nothing leaks: open Phi2ray to reconnect
-  or unblock. Restarting your computer always clears it.
+  or unblock. Restarting your computer clears the ordinary kill switch; Absolute rules persist.
 - **Reconnecting without letting go.** Only the broken piece restarts. Your apps wait a few seconds
   instead of falling back to your real connection.
 - **DNS through the tunnel**, over HTTPS, with a *Test* button to find the fastest server.
-- **Connection info** (the ⓘ button) shows your exit IP and location on a world map, rates the IP
-  from 0 to 100, and checks public blocklists. It only runs when you open it.
+- **Connection info** (the globe button) compares geolocation from ipapi.co, FreeIPAPI and IPQuery
+  with Cloudflare's exit report. It shows IP reputation as 100 minus the risk estimate from
+  proxycheck.io or IPQuery and lists available detection and IPv4 blocklist results. Provider
+  failures leave other results visible. Requests travel through your server while the page is in use.
 
 **Day to day**
 
 - **Split tunnel.** Let some apps or sites skip the VPN, or send only the ones you choose through it.
+- **Groups and servers.** Right-click for actions, or drag the two-line handle to reorder.
+  Starred servers stay above the others. Each group has its own delay-sort setting. Clear search
+  and choose manual order before dragging a server. Drop a text or config file to choose a group,
+  or use **Add → Links → Choose a file**, including when Windows blocks drag from Explorer into an
+  elevated app.
 - The two rays on the main screen are your download and upload, moving with your real traffic.
 - A tray icon shows the state at a glance. Dark and light themes, and a full Persian interface.
 
@@ -150,18 +215,19 @@ keep a history. Copy them first, or pipe them in with `phi2ray add -`.
 
 ## Build it yourself
 
-You need [Rust](https://rustup.rs) and [Node.js](https://nodejs.org) 20 or newer.
+Install stable [Rust](https://rustup.rs) and [Node.js](https://nodejs.org) 22 or newer.
 
 ```bash
 git clone https://github.com/Phoenix15049/Phi2ray.git
 cd Phi2ray
-npm install
+npm ci
 ```
 
 **On Linux**, install the libraries (this is the Ubuntu and Debian list), get the cores, and build:
 
 ```bash
-sudo apt install build-essential libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf file rpm
+sudo apt install build-essential libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
+  librsvg2-dev libxdo-dev libssl-dev patchelf libfuse2 file rpm curl unzip
 ```
 
 ```bash
@@ -201,7 +267,27 @@ npm run tauri dev
 runs the real app. For VPN mode, open the terminal as administrator on Windows, or install a
 package first on Linux so the helper is there.
 
-## Is the file really yours?
+## Build a GitHub release
+
+The [Release workflow](.github/workflows/release.yml) checks the version across the manifests
+and lockfiles, audits dependencies, and verifies the pinned core hashes. For a trial build after
+pushing the branch, choose **Actions → Release → Run workflow**. Download the Windows and Linux
+artifacts from that run.
+
+For the release, run these commands from the final commit on `main`:
+
+```bash
+node scripts/check-release-version.mjs
+git push origin main
+git tag -a v0.2.2 -m "Phi2ray 0.2.2"
+git push origin v0.2.2
+```
+
+After the tagged run succeeds, open **Releases**, review the draft and its files and select
+**Publish release**. If SignPath is configured, approve its request during the Windows job.
+The Linux artifacts include DEB, RPM and AppImage. A successful Arch job adds the Arch package.
+
+## Verify the release files
 
 Releases are built by GitHub Actions straight from the tagged commit
 ([workflow](.github/workflows/release.yml)), never on my own computer, and only if the dependency

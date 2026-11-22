@@ -28,11 +28,13 @@ pub struct Group {
     /// Set for subscription groups; their servers are replaced on every update.
     #[serde(default)]
     pub subscription: Option<Subscription>,
+    #[serde(default)]
+    pub sort_by_delay: bool,
 }
 
 impl Group {
     fn default_group() -> Self {
-        Self { id: DEFAULT_GROUP.into(), name: "My servers".into(), subscription: None }
+        Self { id: DEFAULT_GROUP.into(), name: "My servers".into(), subscription: None, sort_by_delay: false }
     }
 }
 
@@ -60,6 +62,9 @@ pub struct Settings {
     // Protection
     /// Block all traffic outside the connection while connected or reconnecting.
     pub kill_switch: bool,
+    pub absolute_mode: bool,
+    /// Empty means derive the IANA zone from the VPN exit; otherwise an explicit override.
+    pub absolute_timezone: String,
     /// Recover from drops without tearing the tunnel down.
     pub auto_reconnect: bool,
 
@@ -111,6 +116,8 @@ impl Default for Settings {
             selected: None,
             auto_connect: false,
             kill_switch: true,
+            absolute_mode: false,
+            absolute_timezone: String::new(),
             auto_reconnect: true,
             bypass_lan: true,
             iran_direct: false,
@@ -139,7 +146,20 @@ impl Default for Settings {
 }
 
 impl Settings {
+    /// Applies only the fields the caller edited, keeping other callers' newer settings.
+    pub fn patched(&self, patch: serde_json::Map<String, serde_json::Value>) -> Result<Self, String> {
+        let mut value = serde_json::to_value(self).map_err(|e| e.to_string())?;
+        let fields = value.as_object_mut().ok_or("Invalid settings.")?;
+        for (key, value) in patch {
+            let field = fields.get_mut(&key).ok_or_else(|| format!("Unknown setting: {key}"))?;
+            *field = value;
+        }
+        serde_json::from_value(value).map_err(|e| e.to_string())
+    }
+
     pub fn validate(&self) -> Result<(), String> {
+        if self.absolute_mode && !cfg!(windows) { return Err("Absolute mode is currently available on Windows only.".into()); }
+        if !self.absolute_timezone.is_empty() { crate::absolute::windows_zone(&self.absolute_timezone)?; }
         if !matches!(self.tun_stack.as_str(), "mixed" | "system" | "gvisor") {
             return Err("Unknown network stack.".into());
         }
@@ -186,12 +206,14 @@ impl Settings {
     }
 }
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Store {
     pub groups: Vec<Group>,
     pub profiles: Vec<Profile>,
     pub settings: Settings,
+    /// Provider entries removed by the user, keyed by group and connection fingerprint.
+    pub hidden_profiles: std::collections::HashMap<String, std::collections::HashSet<String>>,
     /// Last good IP of each server address. Reconnecting still works when DNS can't be
     /// reached, for example while the kill switch holds the internet blocked after a crash.
     pub resolved: std::collections::HashMap<String, std::net::IpAddr>,
@@ -335,6 +357,22 @@ pub use vault::set_folder as set_key_folder;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn partial_settings_keep_other_edits_and_reject_bad_fields() {
+        let patch = |value: serde_json::Value| value.as_object().unwrap().clone();
+        let settings = Settings::default().patched(patch(serde_json::json!({ "console": true }))).unwrap();
+        let settings = settings.patched(patch(serde_json::json!({ "theme": "dark", "killSwitch": false }))).unwrap();
+        assert!(settings.console);
+        assert_eq!(settings.theme, "dark");
+        assert!(!settings.kill_switch);
+        assert!(settings.auto_reconnect);
+        settings.validate().unwrap();
+        assert!(settings.patched(patch(serde_json::json!({ "killSwitch": "off" }))).is_err());
+        assert!(settings.patched(patch(serde_json::json!({ "killSwtich": false }))).is_err());
+        let invalid = settings.patched(patch(serde_json::json!({ "tunMtu": 100 }))).unwrap();
+        assert!(invalid.validate().is_err());
+    }
 
     #[test]
     fn old_settings_turn_iran_direct_off() {

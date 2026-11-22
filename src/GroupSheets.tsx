@@ -1,9 +1,60 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { DEFAULT_GROUP, Group } from "./api";
+import { importFileError, readImportFiles } from "./dropImport";
 import { useT } from "./i18n";
-import { Segmented, Sheet, Switch } from "./ui";
+import { Icon, Segmented, Sheet, Switch } from "./ui";
 
 export type AddKind = "links" | "subscription" | "group";
+
+export function LibraryDialog(props: {
+  action: "rename" | "delete" | "export";
+  name: string;
+  count?: number;
+  opener: HTMLElement;
+  onConfirm: (name: string) => Promise<boolean>;
+  onClose: () => void;
+}) {
+  const t = useT();
+  const [name, setName] = useState(props.name);
+  const [working, setWorking] = useState(false);
+  const rename = props.action === "rename";
+  const deleting = props.action === "delete";
+  const label = t(rename ? "renameItem" : deleting ? "deleteServer" : "exportConfigs");
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (working || (rename && !name.trim())) return;
+    setWorking(true);
+    try {
+      if (await props.onConfirm(name.trim())) props.onClose();
+    } finally {
+      setWorking(false);
+    }
+  };
+  return (
+    <Sheet dialog title={deleting && props.count !== undefined ? t("deleteGroup") : label} returnFocusTo={props.opener}
+      onClose={() => { if (!working) props.onClose(); }}>
+      <form onSubmit={submit}>
+        {rename ? (
+          <label className="stack-field">
+            <span>{t("name")}</span>
+            <input autoFocus className="input full" maxLength={60} value={name} onChange={(event) => setName(event.target.value)} />
+          </label>
+        ) : (
+          <>
+            <p className="library-dialog-name" dir="auto">{props.name}</p>
+            <p className="hint">{t(deleting ? props.count === undefined ? "deleteProfileText" : "deleteGroupText" : "exportCredentials", { n: props.count ?? 0 })}</p>
+          </>
+        )}
+        <div className="sheet-actions">
+          <button type="button" className="btn" disabled={working} onClick={props.onClose}>{t("cancel")}</button>
+          <button type="submit" className={deleting ? "btn danger" : "btn primary"} disabled={working || (rename && !name.trim())}>
+            {t(rename ? "save" : deleting ? "deleteServer" : "copy")}
+          </button>
+        </div>
+      </form>
+    </Sheet>
+  );
+}
 
 /** True for a single http(s) link, which is a subscription rather than server links. */
 export function looksLikeSubscription(text: string) {
@@ -15,7 +66,8 @@ export function AddSheet(props: {
   initialText: string;
   groups: Group[];
   defaultGroupId: string;
-  onAddLinks: (text: string, groupId: string) => Promise<boolean>;
+  onAddLinks: (text: string, groupId: string, newGroupName?: string) => Promise<boolean>;
+  dropped?: boolean;
   onAddSubscription: (url: string) => Promise<boolean>;
   onCreateGroup: (name: string) => Promise<boolean>;
   onClose: () => void;
@@ -25,11 +77,13 @@ export function AddSheet(props: {
   const [links, setLinks] = useState(props.initialKind === "links" ? props.initialText : "");
   const [url, setUrl] = useState(props.initialKind === "subscription" ? props.initialText : "");
   const [name, setName] = useState("");
-  const manualGroups = props.groups.filter((g) => !g.subscription);
   const [groupId, setGroupId] = useState(
-    manualGroups.some((g) => g.id === props.defaultGroupId) ? props.defaultGroupId : DEFAULT_GROUP,
+    props.groups.some((g) => g.id === props.defaultGroupId) ? props.defaultGroupId : DEFAULT_GROUP,
   );
+  const [newGroupName, setNewGroupName] = useState("");
   const [working, setWorking] = useState(false);
+  const fileInput = useRef<HTMLInputElement>(null);
+  const [fileError, setFileError] = useState<string | null>(null);
 
   const run = async (action: () => Promise<boolean>) => {
     setWorking(true);
@@ -46,16 +100,16 @@ export function AddSheet(props: {
         setKind("subscription");
         return;
       }
-      return run(() => props.onAddLinks(links, groupId));
+      return run(() => props.onAddLinks(links, groupId, groupId ? undefined : newGroupName));
     }
     if (kind === "subscription") return run(() => props.onAddSubscription(url));
     return run(() => props.onCreateGroup(name));
   };
 
-  const canSubmit = !working && (kind === "links" ? links.trim() : kind === "subscription" ? url.trim() : name.trim());
+  const canSubmit = !working && (kind === "links" ? links.trim() && (groupId || newGroupName.trim()) : kind === "subscription" ? url.trim() : name.trim());
 
   return (
-    <Sheet dialog title={t("addTitle")} onClose={props.onClose}>
+    <Sheet dialog title={t(props.dropped ? "dropImportTitle" : "addTitle")} onClose={props.onClose}>
       <Segmented
         className="wide"
         label={t("addTitle")}
@@ -78,18 +132,42 @@ export function AddSheet(props: {
             onChange={(e) => setLinks(e.target.value)}
             spellCheck={false}
           />
-          {manualGroups.length > 1 && (
-            <label className="field-row">
-              <span>{t("addTo")}</span>
-              <select className="select" value={groupId} onChange={(e) => setGroupId(e.target.value)}>
-                {manualGroups.map((g) => (
-                  <option key={g.id} value={g.id}>
-                    {g.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-          )}
+          <button type="button" className="btn small import-file-button" disabled={working} onClick={() => fileInput.current?.click()}>
+            {Icon.down()}{t("chooseConfigFile")}
+          </button>
+          <input type="file" hidden ref={fileInput} onChange={async (event) => {
+            const files = Array.from(event.target.files ?? []);
+            event.target.value = "";
+            if (!files.length) return;
+            setFileError(null);
+            setWorking(true);
+            try {
+              const text = await readImportFiles(files);
+              if (text) setLinks(text);
+              else setFileError(t("dropEmpty"));
+            } catch (error) {
+              setFileError(t(importFileError(error)));
+            } finally {
+              setWorking(false);
+            }
+          }} />
+          {fileError && <p role="alert" className="hint">{fileError}</p>}
+          <label className="field-row import-destination">
+            <span>{t("addTo")}</span>
+            <select className="select" value={groupId} onChange={(e) => setGroupId(e.target.value)}>
+              {props.groups.map((g) => (
+                <option key={g.id} value={g.id}>
+                  {g.id === DEFAULT_GROUP && g.name === "My servers" ? t("myServers") : g.name}
+                  {g.id === props.defaultGroupId ? ` · ${t("currentGroup")}` : ""}
+                </option>
+              ))}
+              <option value="">{t("newGroup")}</option>
+            </select>
+          </label>
+          {!groupId && <label className="stack-field">
+            <span>{t("groupNamePlaceholder")}</span>
+            <input className="input full" maxLength={60} value={newGroupName} onChange={(e) => setNewGroupName(e.target.value)} />
+          </label>}
           <p className="hint">{t("linksHint")}</p>
         </>
       )}

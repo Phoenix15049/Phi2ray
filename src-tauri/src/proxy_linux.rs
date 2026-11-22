@@ -159,6 +159,25 @@ pub fn enable(port: u16, marker: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Returns false when another program owns the proxy now. The caller keeps the backup on error.
+fn restore_gnome(saved: &Saved, mut setting: impl FnMut(&[&str]) -> Option<String>) -> Result<bool, String> {
+    let current = setting(&["get", GNOME_KEYS[3].0, GNOME_KEYS[3].1]).ok_or("cannot read the system proxy")?;
+    if current != saved.ours.to_string() {
+        // A previous attempt may have restored the port and then failed to restore the mode.
+        for ((schema, key), value) in GNOME_KEYS.iter().zip(&saved.gnome).skip(1) {
+            if setting(&["get", schema, key]).ok_or("cannot read the system proxy")? != *value {
+                return Ok(false);
+            }
+        }
+    }
+    // Keep our port until the other values are restored; the mode always comes last.
+    for index in [1, 2, 4, 5, 6, 7, 3, 0] {
+        let (schema, key) = GNOME_KEYS[index];
+        setting(&["set", schema, key, &saved.gnome[index]]).ok_or("cannot restore the system proxy")?;
+    }
+    Ok(true)
+}
+
 pub fn restore(marker: &Path) -> Result<(), String> {
     let Ok(bytes) = fs::read(marker) else { return Ok(()) };
     let Ok(saved) = serde_json::from_slice::<Saved>(&bytes) else {
@@ -173,16 +192,7 @@ pub fn restore(marker: &Path) -> Result<(), String> {
 
     let mut changed = false;
     if saved.gnome.len() == GNOME_KEYS.len() {
-        let current = gsettings(&["get", "org.gnome.system.proxy.http", "port"]);
-        if current.as_deref() == Some(saved.ours.to_string().as_str()) {
-            // The mode comes back last, so nothing uses a half-restored proxy.
-            for ((schema, key), value) in GNOME_KEYS.iter().zip(&saved.gnome).skip(1) {
-                let _ = gsettings(&["set", schema, key, value]);
-            }
-            gsettings(&["set", GNOME, "mode", &saved.gnome[0]]).ok_or("cannot restore the system proxy")?;
-        } else {
-            changed = true;
-        }
+        changed = !restore_gnome(&saved, gsettings)?;
     }
     if saved.kde.len() == KDE_KEYS.len() {
         if let Some((read, write)) = kde_tool("read").zip(kde_tool("write")) {
@@ -202,4 +212,69 @@ pub fn restore(marker: &Path) -> Result<(), String> {
         return Err("The proxy settings were changed by another program, so they were left as they are.".into());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Gnome {
+        values: Vec<String>,
+        fail: Option<usize>,
+        writes: Vec<usize>,
+    }
+
+    impl Gnome {
+        fn call(&mut self, args: &[&str]) -> Option<String> {
+            let index = GNOME_KEYS.iter().position(|&(schema, key)| args[1] == schema && args[2] == key).unwrap();
+            if args[0] == "get" {
+                return Some(self.values[index].clone());
+            }
+            self.writes.push(index);
+            if self.fail == Some(index) {
+                self.fail = None;
+                return None;
+            }
+            self.values[index] = args[3].to_string();
+            Some(String::new())
+        }
+    }
+
+    fn sample() -> (Saved, Gnome) {
+        let saved = Saved { gnome: (0..8).map(|i| format!("saved-{i}")).collect(), ours: 49152, ..Saved::default() };
+        let mut current = Gnome { values: vec!["ours".into(); 8], fail: None, writes: Vec::new() };
+        current.values[3] = saved.ours.to_string();
+        (saved, current)
+    }
+
+    #[test]
+    fn a_failed_key_keeps_ownership_and_can_be_retried() {
+        let (saved, mut current) = sample();
+        current.fail = Some(4);
+        assert!(restore_gnome(&saved, |args| current.call(args)).is_err());
+        assert_eq!(current.values[3], saved.ours.to_string());
+        assert_eq!(current.values[0], "ours");
+        assert!(restore_gnome(&saved, |args| current.call(args)).unwrap());
+        assert_eq!(current.values, saved.gnome);
+        assert_eq!(current.writes.last(), Some(&0));
+    }
+
+    #[test]
+    fn a_failed_mode_is_retried_after_the_port_was_restored() {
+        let (saved, mut current) = sample();
+        current.fail = Some(0);
+        assert!(restore_gnome(&saved, |args| current.call(args)).is_err());
+        assert_eq!(current.values[3], saved.gnome[3]);
+        assert!(restore_gnome(&saved, |args| current.call(args)).unwrap());
+        assert_eq!(current.values, saved.gnome);
+    }
+
+    #[test]
+    fn another_proxy_and_unreadable_settings_are_left_alone() {
+        let (saved, mut current) = sample();
+        current.values[3] = "3128".into();
+        assert!(!restore_gnome(&saved, |args| current.call(args)).unwrap());
+        assert!(current.writes.is_empty());
+        assert!(restore_gnome(&saved, |_| None).is_err());
+    }
 }

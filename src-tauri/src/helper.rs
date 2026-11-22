@@ -202,6 +202,7 @@ fn expect_done(outcome: Outcome) -> Result<(), String> {
 
 pub fn start_xray(config: &str, ports: &[u16]) -> Result<(), String> {
     let link = require()?;
+    link.xray.store(false, Ordering::SeqCst);
     let command = Command::StartXray { config: config.to_string(), ports: ports.to_vec() };
     match link.call(command, CALL_TIMEOUT)? {
         Outcome::PortTaken { port } => {
@@ -217,6 +218,7 @@ pub fn start_xray(config: &str, ports: &[u16]) -> Result<(), String> {
 
 pub fn start_tun(config: &str) -> Result<(), String> {
     let link = require()?;
+    link.tun.store(false, Ordering::SeqCst);
     expect_done(link.call(Command::StartTun { config: config.to_string() }, CALL_TIMEOUT)?)?;
     link.tun.store(true, Ordering::SeqCst);
     Ok(())

@@ -9,13 +9,12 @@
 //! - the local network, when "Bypass local network" is on.
 //!
 //! Fail-closed: the filters are not tied to Phi2ray's process, so if it crashes they keep
-//! blocking instead of letting traffic out. They are never persistent either: restarting
-//! Windows always clears them, so the user can't be locked out for good. On the next start
+//! blocking instead of letting traffic out. Ordinary kill-switch rules clear on reboot;
+//! Absolute rules persist until explicitly disabled. On the next start
 //! Phi2ray finds them (`recover`) and shows the "blocked" state with reconnect and unblock.
 //!
 //! Every filter has a fixed, known key, which is how leftovers are found and removed.
-//! There are two slots: a new rule set goes into the free slot and is in place before the
-//! old slot is removed, so replacing rules never leaves a gap.
+//! Rules are replaced in one transaction so the old set stays in force if an update fails.
 
 use std::path::PathBuf;
 
@@ -24,6 +23,9 @@ pub struct Rules {
     #[cfg_attr(not(windows), allow(dead_code))]
     pub apps: Vec<PathBuf>,
     pub allow_lan: bool,
+    pub strict: bool,
+    pub tun_luid: Option<u64>,
+    pub bootstrap_app: Option<PathBuf>,
 }
 
 #[cfg(windows)]
@@ -85,27 +87,26 @@ mod imp {
         let mut active = ACTIVE.lock().unwrap();
         let slot = if *active == Some(0) { 1 } else { 0 };
         let engine = Engine::open()?;
-        // Clear whatever an earlier run may have left in the free slot, then fill it.
-        engine.transaction(|e| unsafe { remove_slot(e, slot) })?;
-        engine.transaction(|e| unsafe { add_filters(e, slot, rules) })?;
+        engine.transaction(|e| unsafe {
+            remove_slot(e, slot)?;
+            add_filters(e, slot, rules)?;
+            remove_slot(e, 1 - slot)
+        })?;
         *active = Some(slot);
-        // Only now remove the previous rules (or leftovers in the other slot). If that fails
-        // they only block more, never less, and the next enable or disable clears them.
-        let _ = engine.transaction(|e| unsafe { remove_slot(e, 1 - slot) });
         Ok(())
     }
 
     /// Removes every rule. If that fails the kill switch stays on, which is the safe side.
-    pub fn disable() {
+    pub fn disable() -> Result<(), String> {
         let mut active = ACTIVE.lock().unwrap();
-        let Ok(engine) = Engine::open() else { return };
-        let removed = engine.transaction(|e| unsafe {
+        if active.is_none() { return Ok(()); }
+        let engine = Engine::open()?;
+        engine.transaction(|e| unsafe {
             remove_slot(e, 0)?;
             remove_slot(e, 1)
-        });
-        if removed.is_ok() {
-            *active = None;
-        }
+        })?;
+        *active = None;
+        Ok(())
     }
 
     /// Finds rules left behind by a run that ended without removing them (a crash, or the
@@ -151,7 +152,11 @@ mod imp {
         fn transaction(&self, work: impl FnOnce(HANDLE) -> Result<(), String>) -> Result<(), String> {
             check(unsafe { FwpmTransactionBegin0(self.0, 0) }, "start a firewall transaction")?;
             match work(self.0) {
-                Ok(()) => check(unsafe { FwpmTransactionCommit0(self.0) }, "commit the firewall rules"),
+                Ok(()) => {
+                    let result = check(unsafe { FwpmTransactionCommit0(self.0) }, "commit the firewall rules");
+                    if result.is_err() { unsafe { FwpmTransactionAbort0(self.0) }; }
+                    result
+                }
                 Err(e) => {
                     unsafe { FwpmTransactionAbort0(self.0) };
                     Err(e)
@@ -189,6 +194,7 @@ mod imp {
         sublayer.subLayerKey = sublayer_key;
         sublayer.displayData.name = name.as_mut_ptr();
         sublayer.weight = 0xFFFF;
+        if rules.strict { sublayer.flags = FWPM_SUBLAYER_FLAG_PERSISTENT; }
         check(FwpmSubLayerAdd0(engine, &sublayer, null_mut()), "add the firewall sublayer")?;
 
         let mut app_ids = Vec::new();
@@ -246,15 +252,32 @@ mod imp {
     ) -> Result<(), String> {
         let mut next = 0;
         let layers = [
-            (FWPM_LAYER_ALE_AUTH_CONNECT_V4, false),
-            (FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4, false),
-            (FWPM_LAYER_ALE_AUTH_CONNECT_V6, true),
-            (FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6, true),
+            (FWPM_LAYER_ALE_AUTH_CONNECT_V4, false, true),
+            (FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4, false, false),
+            (FWPM_LAYER_ALE_AUTH_CONNECT_V6, true, true),
+            (FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6, true, false),
         ];
-        for (layer, v6) in layers {
-            let mut f = FilterAdder { engine, layer, slot, next: &mut next };
+        for (layer, v6, outbound) in layers {
+            let mut f = FilterAdder { engine, layer, slot, next: &mut next, persistent: rules.strict };
 
             f.add(15, FWP_ACTION_PERMIT, &mut [flags_condition(FWP_CONDITION_FLAG_IS_LOOPBACK)])?;
+            if rules.strict && !v6 {
+                if let Some(path) = &rules.bootstrap_app {
+                    let mut blob = null_mut();
+                    check(FwpmGetAppIdFromFileName0(wide(path.as_os_str()).as_ptr(), &mut blob), "identify DNS bootstrap app")?;
+                    let result: Result<(), String> = (|| {
+                        for ip in [Ipv4Addr::new(1,1,1,1), Ipv4Addr::new(8,8,8,8), Ipv4Addr::new(9,9,9,9)] {
+                            let mut remote = v4_mask((ip,32));
+                            f.add(14, FWP_ACTION_PERMIT, &mut [blob_condition(FWPM_CONDITION_ALE_APP_ID,blob),
+                                sd_condition(FWPM_CONDITION_ALE_USER_ID,elevated), u8_condition(FWPM_CONDITION_IP_PROTOCOL,6),
+                                u16_condition(FWPM_CONDITION_IP_REMOTE_PORT,443),v4_condition(FWPM_CONDITION_IP_REMOTE_ADDRESS,&mut remote)])?;
+                        }
+                        Ok(())
+                    })();
+                    FwpmFreeMemory0(&mut blob as *mut _ as *mut *mut c_void);
+                    result?;
+                }
+            }
             for &app in app_ids {
                 f.add(14, FWP_ACTION_PERMIT, &mut [
                     blob_condition(FWPM_CONDITION_ALE_APP_ID, app),
@@ -266,7 +289,15 @@ mod imp {
             let mut tun_v4 = v4_mask(TUN_V4);
             let mut tun_v6 = v6_mask(TUN_V6);
             let tun = if v6 { v6_condition(FWPM_CONDITION_IP_LOCAL_ADDRESS, &mut tun_v6) } else { v4_condition(FWPM_CONDITION_IP_LOCAL_ADDRESS, &mut tun_v4) };
-            f.add(13, FWP_ACTION_PERMIT, &mut [tun])?;
+            if rules.strict {
+                if let Some(mut luid) = rules.tun_luid {
+                    // Match the actual packet path, not an address an app can bind locally.
+                    let field = if outbound { FWPM_CONDITION_IP_NEXTHOP_INTERFACE } else { FWPM_CONDITION_IP_ARRIVAL_INTERFACE };
+                    let mut interface = condition(field, FWP_MATCH_EQUAL, FWP_UINT64);
+                    interface.conditionValue.Anonymous.uint64 = &mut luid;
+                    f.add(13, FWP_ACTION_PERMIT, &mut [interface])?;
+                }
+            } else { f.add(13, FWP_ACTION_PERMIT, &mut [tun])?; }
 
             // DHCP keeps the real adapter's address alive. Both ports must match (client to
             // server), so a program can't slip out just by sending from the DHCP port.
@@ -280,7 +311,9 @@ mod imp {
             if v6 {
                 for net in LINK_V6 {
                     let mut mask = v6_mask(net);
-                    f.add(12, FWP_ACTION_PERMIT, &mut [v6_condition(FWPM_CONDITION_IP_REMOTE_ADDRESS, &mut mask)])?;
+                    if rules.strict {
+                        f.add(12, FWP_ACTION_PERMIT, &mut [v6_condition(FWPM_CONDITION_IP_REMOTE_ADDRESS, &mut mask),u8_condition(FWPM_CONDITION_IP_PROTOCOL,58)])?;
+                    } else { f.add(12, FWP_ACTION_PERMIT, &mut [v6_condition(FWPM_CONDITION_IP_REMOTE_ADDRESS, &mut mask)])?; }
                 }
             }
             if rules.allow_lan {
@@ -308,6 +341,7 @@ mod imp {
         slot: u8,
         /// Index of the next filter key in this slot.
         next: &'a mut u16,
+        persistent: bool,
     }
 
     impl FilterAdder<'_> {
@@ -328,6 +362,7 @@ mod imp {
             filter.numFilterConditions = conditions.len() as u32;
             filter.filterCondition = if conditions.is_empty() { null_mut() } else { conditions.as_mut_ptr() };
             filter.action.r#type = action;
+            if self.persistent { filter.flags |= FWPM_FILTER_FLAG_PERSISTENT; }
             check(FwpmFilterAdd0(self.engine, &filter, null_mut(), null_mut()), "add a firewall rule")
         }
     }
@@ -456,10 +491,12 @@ mod imp {
 
     /// If the rules can't be removed (the password was refused, say), the kill switch stays on,
     /// which is the safe side.
-    pub fn disable() {
-        if is_active() && helper::ensure().is_ok() {
-            let _ = helper::kill_switch(false, false);
+    pub fn disable() -> Result<(), String> {
+        if is_active() {
+            helper::ensure()?;
+            helper::kill_switch(false, false)?;
         }
+        Ok(())
     }
 
     /// Rules left by a run that ended without removing them. Nothing needs root to see them.
@@ -469,3 +506,15 @@ mod imp {
 }
 
 pub use imp::{disable, enable, is_active, recover};
+
+#[cfg(windows)]
+pub fn tun_luid() -> Result<u64, String> {
+    let name: Vec<u16> = crate::helper_protocol::TUN_NAME.encode_utf16().chain(Some(0)).collect();
+    let mut luid = windows_sys::Win32::NetworkManagement::Ndis::NET_LUID_LH { Value: 0 };
+    let code = unsafe { windows_sys::Win32::NetworkManagement::IpHelper::ConvertInterfaceAliasToLuid(name.as_ptr(), &mut luid) };
+    if code != 0 { return Err(format!("Could not identify protected VPN interface ({code})")); }
+    Ok(unsafe { luid.Value })
+}
+
+#[cfg(not(windows))]
+pub fn tun_luid() -> Result<u64, String> { Err("Absolute mode requires Windows".into()) }

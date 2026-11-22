@@ -106,13 +106,14 @@ impl Core {
     /// `ports` are xray's local listening ports; the first is the one sing-box uses.
     pub fn start_xray(&mut self, exe: &Path, asset_dir: &Path, config: &Value, ports: &[u16]) -> Result<(), String> {
         #[cfg(not(windows))]
-        if crate::helper::running() {
+        if self.uses_helper() || crate::helper::running() {
             // The helper replaces its own xray. One started here makes way first.
             if let Some(Process::Local(old)) = self.xray.take() {
                 kill(old);
             }
-            crate::helper::start_xray(&config.to_string(), ports)?;
+            // Keep the helped identity on failure; recovery must never fall back to the user.
             self.xray = Some(Process::Helped(crate::helper_protocol::Core::Xray));
+            crate::helper::start_xray(&config.to_string(), ports)?;
             return Ok(());
         }
         if let Some(old) = self.xray.take() {
@@ -154,18 +155,22 @@ impl Core {
         matches!(self.xray, Some(Process::Local(_)))
     }
 
+    #[cfg(not(windows))]
+    pub fn uses_helper(&self) -> bool {
+        [&self.xray, &self.tun].into_iter().any(|process| matches!(process, Some(Process::Helped(_))))
+    }
+
     /// The helper checks the config and starts sing-box. An adapter left by an earlier run can
     /// make the first try fail, so it gets a second one.
     #[cfg(not(windows))]
     pub fn start_tun(&mut self, _exe: &Path, _work_dir: &Path, config: &Value) -> Result<(), String> {
         let config = config.to_string();
-        self.tun = None;
+        self.tun = Some(Process::Helped(crate::helper_protocol::Core::Tun));
         if let Err(e) = crate::helper::start_tun(&config) {
             push_log(&self.logs, format!("[app] {e} Trying again."));
             thread::sleep(Duration::from_secs(2));
             crate::helper::start_tun(&config)?;
         }
-        self.tun = Some(Process::Helped(crate::helper_protocol::Core::Tun));
         Ok(())
     }
 
@@ -391,6 +396,26 @@ pub fn version(exe: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::LogBuf;
+
+    #[cfg(not(windows))]
+    #[test]
+    fn helped_cores_remain_identified_after_the_helper_stops() {
+        use super::{Core, Process};
+        use crate::helper_protocol::Core as Helped;
+        let mut core = Core::new(std::sync::Arc::new(std::sync::Mutex::new(LogBuf::default())));
+        assert!(!core.uses_helper());
+        core.xray = Some(Process::Helped(Helped::Xray));
+        assert!(core.uses_helper());
+        // No helper is running in a unit test: failure must preserve the helped identity.
+        assert!(core.start_xray(std::path::Path::new(""), std::path::Path::new(""), &serde_json::json!({}), &[]).is_err());
+        assert!(core.uses_helper());
+        assert!(!core.xray_alive());
+        core.xray = None;
+        core.tun = Some(Process::Helped(Helped::Tun));
+        assert!(core.uses_helper());
+        assert!(core.start_tun(std::path::Path::new(""), std::path::Path::new(""), &serde_json::json!({})).is_err());
+        assert_eq!(core.tun_alive(), Some(false));
+    }
 
     #[test]
     fn log_readers_get_only_new_lines() {

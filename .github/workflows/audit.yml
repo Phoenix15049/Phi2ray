@@ -1,11 +1,12 @@
 # Checks the locked Rust and npm dependencies against the public advisory databases.
-# Runs on every push and pull request, and once a week so new advisories show up too.
+# Runs on branch pushes, pull requests and a weekly schedule. The Release workflow audits tags.
 # Actions are pinned to exact commits (the tag is noted after each), so a changed upstream tag
 # can't change what runs here.
 name: Dependency audit
 
 on:
   push:
+    branches: ["**"]
   pull_request:
   schedule:
     - cron: "0 6 * * 1"
@@ -34,7 +35,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 20
+          node-version: 22
       # What ships in the app. A high-severity advisory here fails the run.
       - name: Audit production dependencies
         run: npm audit --omit=dev --audit-level=high

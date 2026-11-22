@@ -46,6 +46,7 @@ pub fn build(p: &Profile, inb: &Inbounds, s: &Settings, assets: &Assets) -> Valu
         json!({ "type": "field", "inboundTag": ["metrics-in"], "outboundTag": "metrics" }),
         json!({ "type": "field", "inboundTag": ["probe-in"], "outboundTag": "proxy" }),
     ];
+    if s.absolute_mode { rules.push(json!({"type":"field","ip":["::/0"],"outboundTag":"block"})); }
 
     // In VPN mode sing-box does the split (it also sees apps); here only for the proxy modes.
     let split = if s.mode == Mode::Tun { None } else { s.split.rules().filter(|r| r.has_sites()) };
@@ -132,7 +133,7 @@ pub fn build(p: &Profile, inb: &Inbounds, s: &Settings, assets: &Assets) -> Valu
             }
         ],
         "outbounds": [
-            outbound(p),
+            outbound(p, s.mode == Mode::Tun && !s.ipv6),
             { "tag": "direct", "protocol": "freedom" },
             { "tag": "block", "protocol": "blackhole" }
         ],
@@ -159,11 +160,15 @@ pub fn build_test(p: &Profile, http_port: u16) -> Value {
     json!({
         "log": { "loglevel": "none" },
         "inbounds": [{ "tag": "http", "listen": "127.0.0.1", "port": http_port, "protocol": "http", "settings": {} }],
-        "outbounds": [outbound(p)]
+        "outbounds": [outbound(p, false)]
     })
 }
 
-fn outbound(p: &Profile) -> Value {
+pub fn for_export(p: &Profile) -> Value {
+    json!({ "remarks": p.name, "outbounds": [outbound(p, false)] })
+}
+
+fn outbound(p: &Profile, ipv4_only: bool) -> Value {
     let (protocol, settings) = match p.protocol {
         Protocol::Vless => (
             "vless",
@@ -187,8 +192,32 @@ fn outbound(p: &Profile) -> Value {
                 "address": p.address, "port": p.port, "method": p.method, "password": p.secret
             }] }),
         ),
+        Protocol::Http => ("http", json!({})),
+        Protocol::Socks => ("socks", json!({})),
+        Protocol::Wireguard => return crate::parser::wireguard::outbound(p, ipv4_only),
     };
-    json!({ "tag": "proxy", "protocol": protocol, "settings": settings, "streamSettings": stream(&p.stream) })
+    let settings = if let Some(settings) = &p.outbound_settings {
+        let mut settings = settings.clone();
+        settings["address"] = json!(p.address);
+        settings["port"] = json!(p.port);
+        settings
+    } else { settings };
+    let transport = if p.outbound_settings.is_some() {
+        let s = &p.stream;
+        let mut options = s.options.clone().unwrap_or_else(|| json!({"network": s.network, "security": s.security}));
+        if !s.sni.is_empty() {
+            let key = if s.security == "reality" { "realitySettings" } else { "tlsSettings" };
+            if s.security != "none" { options[key]["serverName"] = json!(s.sni); }
+        }
+        if !s.host.is_empty() && matches!(s.network.as_str(), "ws" | "httpupgrade" | "xhttp") {
+            let key = format!("{}Settings", s.network);
+            options[&key]["host"] = json!(s.host);
+        }
+        options
+    } else { stream(&p.stream) };
+    let mut out = json!({ "tag": "proxy", "protocol": protocol, "settings": settings, "streamSettings": transport });
+    if let Some(mux) = &p.mux { out["mux"] = mux.clone(); }
+    out
 }
 
 fn stream(s: &Stream) -> Value {
@@ -208,6 +237,7 @@ fn stream(s: &Stream) -> Value {
             }
             out["xhttpSettings"] = x;
         }
+        "kcp" => out["kcpSettings"] = json!({ "header": { "type": or(&s.header_type, "none") } }),
         "tcp" if s.header_type == "http" => {
             out["tcpSettings"] = json!({ "header": { "type": "http", "request": {
                 "path": [path], "headers": { "Host": split_list(&s.host) }
@@ -238,7 +268,18 @@ fn stream(s: &Stream) -> Value {
         }
         _ => {}
     }
-    out
+    if let Some(options) = &s.options {
+        let mut merged = options.clone();
+        for (key, value) in out.as_object().unwrap() {
+            if let (Some(existing), Some(generated)) = (merged.get_mut(key).and_then(Value::as_object_mut), value.as_object()) {
+                for (k, v) in generated {
+                    // Empty summary fields must not erase an advanced custom option.
+                    if !existing.contains_key(k) || (v != "" && v != &json!([])) { existing.insert(k.clone(), v.clone()); }
+                }
+            } else { merged[key] = value.clone(); }
+        }
+        merged
+    } else { out }
 }
 
 #[cfg(test)]
@@ -262,6 +303,25 @@ pub(crate) mod tests {
     /// Every optional routing feature on, at the most verbose log level.
     fn everything_on() -> Settings {
         Settings { iran_direct: true, block_ads: true, log_level: "info".into(), ..Settings::default() }
+    }
+
+    #[test]
+    fn configuration_exports_reimport_with_advanced_options() {
+        let source = crate::parser::custom::tests::sample(true);
+        let mut profile = crate::parser::parse_many(&source.to_string()).profiles.remove(0);
+        profile.name = "سرور آزمایشی".into();
+        profile.library.starred = true;
+        let link = parse_link("trojan://fake-password@example.invalid:443?type=ws&path=%2Ftest#Sample").unwrap();
+        let parsed = crate::parser::parse_many(&json!([for_export(&profile), for_export(&link)]).to_string());
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+        assert_eq!(parsed.profiles.len(), 2);
+        let first = &parsed.profiles[0];
+        assert_eq!(first.name, profile.name);
+        assert_eq!(first.secret, profile.secret);
+        assert!(!first.library.starred);
+        assert_eq!(outbound(first, false), outbound(&profile, false));
+        assert_eq!(parsed.profiles[1].stream.path, "/test");
+        assert_eq!(parsed.profiles[1].secret, "fake-password");
     }
 
     #[test]
@@ -340,6 +400,8 @@ pub(crate) mod tests {
             ("vless-ws-tls", "vless://11111111-2222-3333-4444-555555555555@example.com:443?type=ws&security=tls&sni=a.com&host=a.com&path=%2Fws&alpn=h2,http%2F1.1#w".to_string()),
             ("vless-grpc", "vless://11111111-2222-3333-4444-555555555555@example.com:443?type=grpc&security=tls&serviceName=svc&mode=multi#g".to_string()),
             ("vless-xhttp", "vless://11111111-2222-3333-4444-555555555555@example.com:443?type=xhttp&security=tls&path=%2Fx&mode=auto#x".to_string()),
+            ("vless-kcp", "vless://11111111-2222-3333-4444-555555555555@example.invalid:443?type=mkcp&seed=test&headerType=srtp".to_string()),
+            ("vless-xhttp-pcs-extra", format!("vless://11111111-2222-3333-4444-555555555555@example.invalid:443?type=xhttp&security=tls&fp=chrome&pcs={}&extra=%7B%22scMinPostsIntervalMs%22%3A%2230%22%2C%22noSSEHeader%22%3Atrue%7D", "ab".repeat(32))),
             ("vless-httpupgrade", "vless://11111111-2222-3333-4444-555555555555@example.com:443?type=httpupgrade&security=tls&path=%2Fh&host=a.com#h".to_string()),
             ("trojan-tcp-http", "trojan://pass@example.com:443?type=tcp&headerType=http&host=a.com&path=%2F#t".to_string()),
             ("shadowsocks", format!("ss://{ss}@example.com:8388#s")),
@@ -350,9 +412,45 @@ pub(crate) mod tests {
             let p = parse_link(link).unwrap();
             write(dir.join(format!("{name}.json")), &build(&p, &inbounds(), &Settings::default(), &assets));
         }
+        for tls in [false, true] {
+            let raw = crate::parser::custom::tests::sample(tls);
+            let p = crate::parser::parse_many(&raw.to_string()).profiles.remove(0);
+            let name = if tls { "custom-xhttp-pinned-tls" } else { "custom-xhttp-encryption" };
+            write(dir.join(format!("{name}.json")), &build(&p, &inbounds(), &Settings::default(), &assets));
+            write(dir.join(format!("{name}-delay.json")), &build_test(&p, 10803));
+        }
+        for (protocol, raw) in crate::parser::custom::tests::common_samples() {
+            let p = crate::parser::parse_many(&raw.to_string()).profiles.remove(0);
+            write(dir.join(format!("custom-{protocol}.json")), &build_test(&p, 10803));
+        }
         let p = parse_link(&samples[0].1).unwrap();
         write(dir.join("all-options.json"), &build(&p, &inbounds(), &everything_on(), &assets));
         write(dir.join("delay-test.json"), &build_test(&p, 10803));
+        let strict = crate::absolute::effective(&Settings{absolute_mode:true,..Settings::default()});
+        let cfg = build(&p,&inbounds(),&strict,&assets);
+        write(dir.join("absolute-ready.json"),&cfg);
+        write(dir.join("absolute-preparing.json"),&crate::connection::gated_config(&cfg));
+        let wireguard = json!({
+            "protocol": "wireguard",
+            "settings": {
+                "secretKey": "11".repeat(32),
+                "address": ["10.7.0.2/32", "fd00::2/128"],
+                "remoteDNS": ["10.7.0.1", "fd00::1"],
+                "reserved": [1, 2, 3],
+                "peers": [{
+                    "endpoint": "198.51.100.27:51820",
+                    "publicKey": "22".repeat(32),
+                    "preSharedKey": "33".repeat(32),
+                    "allowedIPs": ["0.0.0.0/0", "::/0"],
+                    "keepAlive": 25
+                }]
+            }
+        });
+        let wg = crate::parser::parse_many(&wireguard.to_string()).profiles.remove(0);
+        write(dir.join("wireguard-delay.json"), &build_test(&wg, 10803));
+        write(dir.join("wireguard-vpn.json"), &build(&wg, &inbounds(), &Settings { ipv6: true, ..Settings::default() }, &assets));
+        let wg_strict = build(&wg, &inbounds(), &strict, &assets);
+        write(dir.join("wireguard-absolute.json"), &crate::connection::gated_config(&wg_strict));
         for (name, mode) in [("split-exclude-proxy", crate::split::SplitMode::Exclude), ("split-include-proxy", crate::split::SplitMode::Include)] {
             let settings = Settings { mode: Mode::System, split: sample_split(mode), ..Settings::default() };
             write(dir.join(format!("{name}.json")), &build(&p, &inbounds(), &settings, &assets));
@@ -362,6 +460,7 @@ pub(crate) mod tests {
         let tun_dir = dir.join("sing-box");
         std::fs::create_dir_all(&tun_dir).unwrap();
         let variants = [
+            ("absolute", strict, "203.0.113.7"),
             ("default", Settings::default(), "203.0.113.7"),
             (
                 "all-options",

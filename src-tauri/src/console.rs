@@ -187,7 +187,7 @@ fn run(app: &AppHandle, command: Command, progress: &mut dyn FnMut(Value)) -> Re
         }
         Command::Test { servers, group } => test(app, state, servers, group, progress),
         Command::Mode { mode } => {
-            let Some(mode) = mode else { return Ok(json!(mode_name(state.store.lock().unwrap().settings.mode))) };
+            let Some(mode) = mode else { return Ok(json!(mode_name(crate::absolute::effective(&state.store.lock().unwrap().settings).mode))) };
             let mode = match mode.to_ascii_lowercase().as_str() {
                 "vpn" | "tun" => Mode::Tun,
                 "proxy" | "system" => Mode::System,
@@ -199,7 +199,7 @@ fn run(app: &AppHandle, command: Command, progress: &mut dyn FnMut(Value)) -> Re
             to_value(status(app, state))
         }
         Command::KillSwitch { on } => {
-            let Some(on) = on else { return Ok(json!(state.store.lock().unwrap().settings.kill_switch)) };
+            let Some(on) = on else { return Ok(json!(crate::absolute::effective(&state.store.lock().unwrap().settings).kill_switch)) };
             connection::log(state, format!("[console] kill switch {}", if on { "on" } else { "off" }));
             change_settings(app, state, |s| s.kill_switch = on)?;
             to_value(status(app, state))
@@ -220,7 +220,7 @@ fn run(app: &AppHandle, command: Command, progress: &mut dyn FnMut(Value)) -> Re
         }
         Command::Quit => {
             connection::log(state, "[console] quit");
-            connection::disconnect(state);
+            connection::shutdown(state)?;
             Ok(Value::Null)
         }
     }
@@ -281,13 +281,15 @@ fn mode_name(mode: Mode) -> &'static str {
 /// Changes settings the way the window does. A connection keeps running on what it started
 /// with, except the mode: like the window, a mode change reconnects right away.
 fn change_settings(app: &AppHandle, state: &AppState, edit: impl FnOnce(&mut Settings)) -> Result<(), String> {
-    let mut settings = state.store.lock().unwrap().settings.clone();
-    let old_mode = settings.mode;
-    edit(&mut settings);
-    let new_mode = settings.mode;
-    crate::save_settings(app, state, settings)?;
+    let mut mode_changed = false;
+    crate::edit_settings(app, state, false, |settings| {
+        let old_mode = settings.mode;
+        edit(settings);
+        mode_changed = settings.mode != old_mode;
+        Ok(())
+    })?;
     changed(app);
-    let reconnect = state.link.lock().unwrap().as_ref().filter(|_| new_mode != old_mode).map(|l| l.session.profile_id.clone());
+    let reconnect = state.link.lock().unwrap().as_ref().filter(|_| mode_changed).map(|l| l.session.profile_id.clone());
     if let Some(id) = reconnect {
         let result = connection::connect(app, state, &id);
         changed(app);

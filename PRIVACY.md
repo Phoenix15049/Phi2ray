@@ -25,12 +25,18 @@ Phi2ray only contacts other systems for the things below.
   in its link avoids these lookups entirely.
 - **Cloudflare (`1.1.1.1/cdn-cgi/trace`).** Asked through your connection after connecting, to
   show your exit IP and country.
-- **Connection info: ipapi.co, DB-IP, FreeIPAPI, Cloudflare and proxycheck.io.** Only when you
-  open that page. They receive your exit IP and your server's IP, and every request goes through
-  your server. For the IP quality check, your exit IP is also looked up on public DNS blocklists
+- **Connection info: ipapi.co, IPQuery, FreeIPAPI, Cloudflare and proxycheck.io.** Requests run
+  through your server while this page is in use. ipapi.co and IPQuery receive the public entry IP
+  when it is available. The displayed exit IP is checked with proxycheck.io. If that service has no
+  risk score, IPQuery's score is used for the same exit IP, with an explicit lookup if its first
+  answer reported a different exit. IPv4 exits are also checked against public DNS blocklists
   (Barracuda, blocklist.de, DroneBL, SpamCop and s5h) through Cloudflare's encrypted DNS.
+- **Absolute mode: Cloudflare and ipapi.co.** Through the VPN, Cloudflare reports the IPv4 exit
+  and ipapi.co estimates its timezone. The check runs at connection setup and periodically
+  while Absolute is active. A manual timezone skips the ipapi.co request.
 
-The map on that page places you from your computer's time zone. That stays on your computer.
+The connection map can estimate your location from your computer's timezone locally. Absolute
+hides that marker because it changes the system timezone to the VPN exit's timezone.
 
 These services have their own privacy policies. Your server's operator can see the traffic you
 send through it, as with any VPN or proxy.
