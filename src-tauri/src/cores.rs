@@ -156,7 +156,7 @@ mod imp {
         Ok(())
     }
 
-    /// Builds without embedded cores check them with the `.sha256` pins instead (see `xray::verify`).
+    /// Builds without embedded cores use the pins compiled into the application instead (see `xray::verify`).
     pub fn trusted(_exe: &Path) -> bool {
         true
     }

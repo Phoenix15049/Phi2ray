@@ -31,6 +31,9 @@ pub fn effective(s: &Settings) -> Settings {
         s.strict_route = true;
         s.ipv6 = false;
         s.remote_dns = "https://1.1.1.1/dns-query".into();
+        if !s.test_url.trim().to_ascii_lowercase().starts_with("https://") {
+            s.test_url = Settings::default().test_url;
+        }
     }
     s
 }
@@ -863,6 +866,24 @@ mod tests {
         let restored: Backup = serde_json::from_str(&serde_json::to_string(&original).unwrap()).unwrap();
         assert!(restored.same_settings(&original));
         assert!(serde_json::from_str::<Backup>(&json.replace("\"windows\":null", "\"windows\":{}")).is_err());
+    }
+
+    #[test]
+    fn absolute_checks_nested_xhttp_transport_without_breaking_ordinary_imports() {
+        let mut p = crate::parser::parse_link("vless://test@proxy.example:443?security=tls&type=xhttp").unwrap();
+        p.stream.options = Some(serde_json::json!({
+            "network": "xhttp", "security": "tls", "xhttpSettings": {"extra": {
+                "downloadSettings": {"network": "xhttp", "security": "tls", "xhttpSettings": {
+                    "downloadSettings": {"network": "xhttp", "security": "none"}
+                }}
+            }}
+        }));
+        assert_eq!(p.insecure(), Some("unencrypted"));
+        assert!(validate_profile(&p).is_err());
+        p.stream.options.as_mut().unwrap()["xhttpSettings"]["extra"]["downloadSettings"]
+            ["xhttpSettings"]["downloadSettings"]["security"] = serde_json::json!("reality");
+        assert_eq!(p.insecure(), None);
+        assert!(validate_profile(&p).is_ok());
     }
 
     #[test]

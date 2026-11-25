@@ -84,7 +84,7 @@ fn main() -> ExitCode {
     match run(args, json) {
         Ok(()) => ExitCode::SUCCESS,
         Err(f) => {
-            eprintln!("phi2ray: {}", f.message);
+            eprintln!("phi2ray: {}", terminal_text(&f.message));
             ExitCode::from(f.code)
         }
     }
@@ -136,7 +136,7 @@ fn run(mut args: Vec<String>, json: bool) -> Result<(), Failure> {
             if changing {
                 print_status(&serde_json::from_value(data).map_err(|e| e.to_string())?);
             } else {
-                println!("{}", data.as_str().unwrap_or_default());
+                println!("{}", terminal_text(data.as_str().unwrap_or_default()));
             }
             Ok(())
         }
@@ -190,11 +190,11 @@ fn run(mut args: Vec<String>, json: bool) -> Result<(), Failure> {
             let view: AddView = call(Command::Add { text, group })?;
             output(json, &view, |v| {
                 match &v.group {
-                    Some(g) => println!("Added subscription \"{g}\" with {} servers.", v.added),
+                    Some(g) => println!("Added subscription \"{}\" with {} servers.", terminal_text(&g), v.added),
                     None => println!("Added {} server{}.", v.added, plural(v.added)),
                 }
                 for e in &v.errors {
-                    println!("  ! {e}");
+                    println!("  ! {}", terminal_text(&e));
                 }
             })
         }
@@ -205,8 +205,8 @@ fn run(mut args: Vec<String>, json: bool) -> Result<(), Failure> {
                 if let Ok(v) = serde_json::from_value::<UpdateView>(data.clone()) {
                     if !json {
                         match (&v.servers, &v.error) {
-                            (Some(n), _) => println!("{}: {n} servers", v.group),
-                            (_, Some(e)) => println!("{}: failed: {e}", v.group),
+                            (Some(n), _) => println!("{}: {n} servers", terminal_text(&v.group)),
+                            (_, Some(e)) => println!("{}: failed: {}", terminal_text(&v.group), terminal_text(&e)),
                             _ => {}
                         }
                     }
@@ -285,7 +285,7 @@ fn test(servers: Vec<String>, group: Option<String>, json: bool) -> Result<(), F
     let reachable = results.iter().filter(|r| r.ms.is_some()).count();
     print!("\n{reachable} of {tested} servers answered.");
     if let Some(best) = results.iter().filter(|r| r.ms.is_some()).min_by_key(|r| r.ms) {
-        print!(" Fastest: {} {} ({} ms).", best.number, best.name, best.ms.unwrap_or(0));
+        print!(" Fastest: {} {} ({} ms).", best.number, terminal_text(&best.name), best.ms.unwrap_or(0));
     }
     println!();
     Ok(())
@@ -306,7 +306,7 @@ fn logs(mut args: Vec<String>, json: bool) -> Result<(), Failure> {
             if json {
                 println!("{}", Value::String(line.clone()));
             } else {
-                println!("{line}");
+                println!("{}", terminal_text(&line));
             }
         }
         if !follow {
@@ -396,7 +396,7 @@ fn print_servers(servers: &Vec<ServerView>) {
     let mut group = None;
     for s in servers {
         if group != Some(&s.group) {
-            println!("{}{}", if group.is_some() { "\n" } else { "" }, s.group);
+            println!("{}{}", if group.is_some() { "\n" } else { "" }, terminal_text(&s.group));
             group = Some(&s.group);
         }
         let mark = if s.selected { "*" } else { " " };
@@ -405,8 +405,8 @@ fn print_servers(servers: &Vec<ServerView>) {
             "{mark}{:>4}  {:<32} {:<12} {}:{}{warning}",
             s.number,
             fit(&s.name, 32),
-            format!("{}{}", s.protocol, transport(s)),
-            s.address,
+            terminal_text(&format!("{}{}", s.protocol, transport(s))),
+            terminal_text(&s.address),
             s.port
         );
     }
@@ -427,7 +427,7 @@ fn print_groups(groups: &Vec<GroupView>) {
         }
         println!("{:>4}  {:<32} {detail}", g.number, fit(&g.name, 32));
         if let Some(e) = &g.last_error {
-            println!("      ! last update failed: {e}");
+            println!("      ! last update failed: {}", terminal_text(e));
         }
     }
 }
@@ -472,7 +472,7 @@ fn print_info(report: &Value) {
 }
 
 fn row(label: &str, value: &str) {
-    println!("  {label:<12} {value}");
+    println!("  {:<12} {}", terminal_text(label), terminal_text(value));
 }
 
 fn transport(s: &ServerView) -> String {
@@ -491,8 +491,17 @@ fn insecure_text(why: &str) -> &'static str {
     }
 }
 
+/// Keep remote titles and diagnostics as plain, single-line terminal text.
+fn terminal_text(text: &str) -> String {
+    text.chars().map(|c| {
+        if c.is_control() || matches!(c, '\u{061c}' | '\u{200e}' | '\u{200f}' |
+            '\u{2028}'..='\u{202e}' | '\u{2066}'..='\u{2069}') { '\u{fffd}' } else { c }
+    }).collect()
+}
+
 /// Cuts `text` to `width` characters, so columns stay lined up.
 fn fit(text: &str, width: usize) -> String {
+    let text = terminal_text(text);
     if text.chars().count() <= width {
         text.to_string()
     } else {
@@ -584,6 +593,11 @@ fn joined(args: Vec<String>) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn terminal_text_strips_control_effects_without_losing_script_text() {
+        assert_eq!(super::terminal_text("سلام\u{1b}\n\u{202e}OK"), "سلام���OK");
+    }
+
     use super::*;
 
     #[test]

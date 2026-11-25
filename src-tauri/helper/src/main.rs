@@ -19,6 +19,10 @@
 mod protocol;
 
 #[cfg(target_os = "linux")]
+#[path = "../../src/core_hashes.rs"]
+mod core_hashes;
+
+#[cfg(target_os = "linux")]
 mod helper;
 
 #[cfg(target_os = "linux")]

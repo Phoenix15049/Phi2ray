@@ -91,14 +91,17 @@ pub async fn fetch(url: &str, proxy: Option<&crate::probe::LocalProxy>) -> Resul
         return Err("Subscription links must start with https:// or http://".into());
     }
 
+    let proxied = proxy.is_some();
     let mut client = reqwest::Client::builder()
         .timeout(FETCH_TIMEOUT)
         .user_agent(concat!("Phi2ray/", env!("CARGO_PKG_VERSION")))
-        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+        .redirect(reqwest::redirect::Policy::custom(move |attempt| {
             // An https link must stay https: a redirect to http would let anyone on the
             // path read the subscription token and swap the servers.
             let downgrade = attempt.previous().iter().any(|u| u.scheme() == "https") && attempt.url().scheme() != "https";
-            if downgrade {
+            if proxied {
+                attempt.error("redirects cannot be checked through the proxy")
+            } else if downgrade {
                 attempt.error("the provider redirected to an unencrypted (http) address")
             } else if is_local_target(attempt.url()) {
                 // Phi2ray runs as administrator: a provider mustn't be able to make it send
@@ -113,14 +116,19 @@ pub async fn fetch(url: &str, proxy: Option<&crate::probe::LocalProxy>) -> Resul
     if let Some(proxy) = proxy {
         client = client.proxy(proxy.for_reqwest()?);
     } else {
-        // Direct downloads resolve names themselves: any name other than the one the user
-        // entered may only lead to public addresses (no redirect to a name pointing at 127.0.0.1).
-        let entered = parsed.host_str().unwrap_or_default().to_ascii_lowercase();
-        client = client.no_proxy().dns_resolver(Arc::new(PublicOnly { entered }));
+        // Literal private IPs explicitly entered by the user still work on the initial request.
+        // Hostnames are always restricted at resolution, including same-origin redirects.
+        client = client.no_proxy().dns_resolver(Arc::new(PublicOnly));
     }
     let client = client.build().map_err(|e| e.to_string())?;
 
-    let response = client.get(parsed).send().await.map_err(describe)?;
+    let response = client.get(parsed).send().await.map_err(|e| {
+        if proxied && e.is_redirect() {
+            "This subscription redirects. Use its final URL while connected.".into()
+        } else {
+            describe(e)
+        }
+    })?;
     if !response.status().is_success() {
         return Err(format!("The provider answered with HTTP {}.", response.status().as_u16()));
     }
@@ -192,20 +200,16 @@ fn is_local_target(url: &url::Url) -> bool {
     }
 }
 
-/// Resolves names for direct subscription downloads, dropping private and loopback answers for
-/// every name except the one the user typed (which may legitimately be on their own network).
-struct PublicOnly {
-    entered: String,
-}
+/// Resolves direct subscription hostnames to public addresses at the point of use.
+struct PublicOnly;
 
 impl reqwest::dns::Resolve for PublicOnly {
     fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
         let host = name.as_str().to_ascii_lowercase();
-        let any_address = host == self.entered;
         Box::pin(async move {
             let found: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), 0)).await?.collect();
             let allowed: Vec<SocketAddr> =
-                found.into_iter().filter(|a| any_address || crate::netinfo::is_public(a.ip())).collect();
+                found.into_iter().filter(|a| crate::netinfo::is_public(a.ip())).collect();
             if allowed.is_empty() {
                 return Err("the provider pointed to a local address".into());
             }

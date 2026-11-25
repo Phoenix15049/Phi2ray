@@ -219,13 +219,26 @@ pub(super) fn pin_downloads(p: &mut Profile, mut resolve: impl FnMut(&str, u16) 
     Ok(())
 }
 
+/// Each separate XHTTP download transport negotiates security independently.
+pub(super) fn unencrypted_download(stream: &Value) -> bool {
+    let settings = &stream["xhttpSettings"];
+    [settings.get("downloadSettings"), settings["extra"].get("downloadSettings")]
+        .into_iter().flatten().any(|download| {
+            !matches!(download["security"].as_str(), Some("tls" | "reality"))
+                || download["tlsSettings"]["allowInsecure"] == true
+                || unencrypted_download(download)
+        })
+}
+
 fn check_local_access(v: &Value) -> Result<(), String> {
     match v {
         Value::Object(o) => for (k, value) in o {
             let key = k.to_ascii_lowercase();
             if key == "headers" { continue; }
-            if (key == "downloadsettings" && k != "downloadSettings") || (key == "extra" && k != "extra") {
-                return Err("use standard extra/downloadSettings field names".into());
+            if [("downloadsettings", "downloadSettings"), ("extra", "extra"), ("allowinsecure", "allowInsecure")]
+                .iter().any(|(lower, canonical)| key == *lower && k != canonical)
+            {
+                return Err("use standard XHTTP and TLS field names".into());
             }
             // Go's JSON decoder also accepts differently cased field names.
             if matches!(key.as_str(), "certificatefile" | "keyfile" | "masterkeylog" | "dialerproxy" | "customsockopt" | "interface" | "mark" | "tproxy")

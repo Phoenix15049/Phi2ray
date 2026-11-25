@@ -17,6 +17,9 @@
 //! Rules are replaced in one transaction so the old set stays in force if an update fails.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static VERIFIED: AtomicBool = AtomicBool::new(false);
 
 pub struct Rules {
     /// Programs allowed to use the real network. On Linux that's decided by the cores' account.
@@ -44,7 +47,7 @@ mod imp {
     use super::Rules;
 
     /// The slot holding the current rules, if the kill switch is on.
-    static ACTIVE: Mutex<Option<u8>> = Mutex::new(None);
+    static ACTIVE: Mutex<Option<(u8, Vec<u64>)>> = Mutex::new(None);
 
     /// Fixed keys, the same in every version, so leftovers from any earlier run are found.
     const SUBLAYER_BASE: u128 = 0x7f3c_9a2e_51d4_4b8e_9a61_0c2f_7e4d_0000;
@@ -74,7 +77,7 @@ mod imp {
     /// Link-local and multicast: neighbour discovery and router advertisements.
     const LINK_V6: [(Ipv6Addr, u8); 2] = [
         (Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0), 10),
-        (Ipv6Addr::new(0xff00, 0, 0, 0, 0, 0, 0, 0), 8),
+        (Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 0), 16),
     ];
 
     pub fn is_active() -> bool {
@@ -85,14 +88,15 @@ mod imp {
     /// before the old ones are removed, so there is no unprotected gap.
     pub fn enable(rules: &Rules) -> Result<(), String> {
         let mut active = ACTIVE.lock().unwrap();
-        let slot = if *active == Some(0) { 1 } else { 0 };
+        let slot = if active.as_ref().is_some_and(|(s, _)| *s == 0) { 1 } else { 0 };
+        let mut ids = Vec::new();
         let engine = Engine::open()?;
         engine.transaction(|e| unsafe {
             remove_slot(e, slot)?;
-            add_filters(e, slot, rules)?;
+            ids = add_filters(e, slot, rules)?;
             remove_slot(e, 1 - slot)
         })?;
-        *active = Some(slot);
+        *active = Some((slot, ids));
         Ok(())
     }
 
@@ -121,8 +125,26 @@ mod imp {
             }
             exists
         });
-        *ACTIVE.lock().unwrap() = found;
+        *ACTIVE.lock().unwrap() = found.map(|slot| (slot, Vec::new()));
         found.is_some()
+    }
+
+    pub fn verify() -> Result<(), String> {
+        let active = ACTIVE.lock().unwrap();
+        let (slot, ids) = active.as_ref().filter(|(_, ids)| !ids.is_empty())
+            .ok_or("No verified Windows kill-switch rule set.")?;
+        let engine = Engine::open()?;
+        for (index, expected) in ids.iter().enumerate() {
+            let mut filter: *mut FWPM_FILTER0 = null_mut();
+            unsafe {
+                let found = FwpmFilterGetByKey0(engine.0, &filter_key(*slot, index as u16), &mut filter);
+                let valid = found == 0 && !filter.is_null() && (*filter).filterId == *expected
+                    && (*filter).flags & FWPM_FILTER_FLAG_DISABLED == 0;
+                if !filter.is_null() { FwpmFreeMemory0(&mut filter as *mut _ as *mut *mut c_void); }
+                if !valid { return Err("An active Windows kill-switch filter changed or disappeared.".into()); }
+            }
+        }
+        Ok(())
     }
 
     fn sublayer_key(slot: u8) -> GUID {
@@ -187,7 +209,7 @@ mod imp {
         }
     }
 
-    unsafe fn add_filters(engine: HANDLE, slot: u8, rules: &Rules) -> Result<(), String> {
+    unsafe fn add_filters(engine: HANDLE, slot: u8, rules: &Rules) -> Result<Vec<u64>, String> {
         let sublayer_key = sublayer_key(slot);
         let mut name = wide("Phi2ray");
         let mut sublayer: FWPM_SUBLAYER0 = std::mem::zeroed();
@@ -249,8 +271,8 @@ mod imp {
         rules: &Rules,
         app_ids: &[*mut FWP_BYTE_BLOB],
         elevated: &mut FWP_BYTE_BLOB,
-    ) -> Result<(), String> {
-        let mut next = 0;
+    ) -> Result<Vec<u64>, String> {
+        let mut ids = Vec::new();
         let layers = [
             (FWPM_LAYER_ALE_AUTH_CONNECT_V4, false, true),
             (FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4, false, false),
@@ -258,7 +280,7 @@ mod imp {
             (FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6, true, false),
         ];
         for (layer, v6, outbound) in layers {
-            let mut f = FilterAdder { engine, layer, slot, next: &mut next, persistent: rules.strict };
+            let mut f = FilterAdder { engine, layer, slot, ids: &mut ids, persistent: rules.strict };
 
             f.add(15, FWP_ACTION_PERMIT, &mut [flags_condition(FWP_CONDITION_FLAG_IS_LOOPBACK)])?;
             if rules.strict && !v6 {
@@ -302,20 +324,40 @@ mod imp {
             // DHCP keeps the real adapter's address alive. Both ports must match (client to
             // server), so a program can't slip out just by sending from the DHCP port.
             let (client_port, server_port) = if v6 { (546, 547) } else { (68, 67) };
-            f.add(12, FWP_ACTION_PERMIT, &mut [
-                u8_condition(FWPM_CONDITION_IP_PROTOCOL, IPPROTO_UDP),
-                u16_condition(FWPM_CONDITION_IP_LOCAL_PORT, client_port),
-                u16_condition(FWPM_CONDITION_IP_REMOTE_PORT, server_port),
-            ])?;
+            if v6 {
+                let dhcp_multicast = (Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 1, 2), 128);
+                for net in [LINK_V6[0], dhcp_multicast] {
+                    let mut mask = v6_mask(net);
+                    f.add(12, FWP_ACTION_PERMIT, &mut [
+                        u8_condition(FWPM_CONDITION_IP_PROTOCOL, IPPROTO_UDP),
+                        u16_condition(FWPM_CONDITION_IP_LOCAL_PORT, client_port),
+                        u16_condition(FWPM_CONDITION_IP_REMOTE_PORT, server_port),
+                        v6_condition(FWPM_CONDITION_IP_REMOTE_ADDRESS, &mut mask),
+                    ])?;
+                }
+            } else {
+                f.add(12, FWP_ACTION_PERMIT, &mut [
+                    u8_condition(FWPM_CONDITION_IP_PROTOCOL, IPPROTO_UDP),
+                    u16_condition(FWPM_CONDITION_IP_LOCAL_PORT, client_port),
+                    u16_condition(FWPM_CONDITION_IP_REMOTE_PORT, server_port),
+                ])?;
+            }
 
             if v6 {
+                // The WFP ICMP type condition aliases IP_LOCAL_PORT.
+                let types: &[u16] = if outbound { &[133, 135, 136] } else { &[134, 135, 136] };
                 for net in LINK_V6 {
-                    let mut mask = v6_mask(net);
-                    if rules.strict {
-                        f.add(12, FWP_ACTION_PERMIT, &mut [v6_condition(FWPM_CONDITION_IP_REMOTE_ADDRESS, &mut mask),u8_condition(FWPM_CONDITION_IP_PROTOCOL,58)])?;
-                    } else { f.add(12, FWP_ACTION_PERMIT, &mut [v6_condition(FWPM_CONDITION_IP_REMOTE_ADDRESS, &mut mask)])?; }
+                    for &kind in types {
+                        let mut mask = v6_mask(net);
+                        f.add(12, FWP_ACTION_PERMIT, &mut [
+                            v6_condition(FWPM_CONDITION_IP_REMOTE_ADDRESS, &mut mask),
+                            u8_condition(FWPM_CONDITION_IP_PROTOCOL, 58),
+                            u16_condition(FWPM_CONDITION_IP_LOCAL_PORT, kind),
+                        ])?;
+                    }
                 }
             }
+
             if rules.allow_lan {
                 if v6 {
                     for net in LAN_V6 {
@@ -332,15 +374,14 @@ mod imp {
 
             f.add(0, FWP_ACTION_BLOCK, &mut [])?;
         }
-        Ok(())
+        Ok(ids)
     }
 
     struct FilterAdder<'a> {
         engine: HANDLE,
         layer: GUID,
         slot: u8,
-        /// Index of the next filter key in this slot.
-        next: &'a mut u16,
+        ids: &'a mut Vec<u64>,
         persistent: bool,
     }
 
@@ -350,11 +391,10 @@ mod imp {
             let mut name = wide("Phi2ray kill switch");
             let mut filter: FWPM_FILTER0 = std::mem::zeroed();
             filter.displayData.name = name.as_mut_ptr();
-            if *self.next >= MAX_FILTERS {
+            if self.ids.len() >= usize::from(MAX_FILTERS) {
                 return Err("Kill switch: too many firewall rules.".into());
             }
-            filter.filterKey = filter_key(self.slot, *self.next);
-            *self.next += 1;
+            filter.filterKey = filter_key(self.slot, self.ids.len() as u16);
             filter.layerKey = self.layer;
             filter.subLayerKey = sublayer_key(self.slot);
             filter.weight.r#type = FWP_UINT8;
@@ -363,7 +403,10 @@ mod imp {
             filter.filterCondition = if conditions.is_empty() { null_mut() } else { conditions.as_mut_ptr() };
             filter.action.r#type = action;
             if self.persistent { filter.flags |= FWPM_FILTER_FLAG_PERSISTENT; }
-            check(FwpmFilterAdd0(self.engine, &filter, null_mut(), null_mut()), "add a firewall rule")
+            let mut id = 0;
+            check(FwpmFilterAdd0(self.engine, &filter, null_mut(), &mut id), "add a firewall rule")?;
+            self.ids.push(id);
+            Ok(())
         }
     }
 
@@ -484,6 +527,10 @@ mod imp {
         Path::new(KILL_SWITCH_FLAG).exists()
     }
 
+    pub fn verify() -> Result<(), String> {
+        helper::verify_kill_switch()
+    }
+
     pub fn enable(rules: &Rules) -> Result<(), String> {
         helper::ensure()?;
         helper::kill_switch(true, rules.allow_lan)
@@ -505,7 +552,27 @@ mod imp {
     }
 }
 
-pub use imp::{disable, enable, is_active, recover};
+pub use imp::{is_active, recover};
+
+/// Recovery hints must not be displayed as a verified active firewall.
+pub fn verified() -> bool { VERIFIED.load(Ordering::SeqCst) }
+
+pub fn verify() -> Result<(), String> {
+    let result = imp::verify();
+    VERIFIED.store(result.is_ok(), Ordering::SeqCst);
+    result
+}
+
+pub fn enable(rules: &Rules) -> Result<(), String> {
+    imp::enable(rules)?;
+    verify()
+}
+
+pub fn disable() -> Result<(), String> {
+    imp::disable()?;
+    VERIFIED.store(false, Ordering::SeqCst);
+    Ok(())
+}
 
 #[cfg(windows)]
 pub fn tun_luid() -> Result<u64, String> {

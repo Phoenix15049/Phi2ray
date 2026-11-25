@@ -20,8 +20,8 @@ const DNS_PRESETS: { value: string; label: string; tag?: StringKey }[] = [
 ];
 
 const TEST_URL_PRESETS = [
-  { value: "http://www.gstatic.com/generate_204", label: "Google" },
-  { value: "http://cp.cloudflare.com/generate_204", label: "Cloudflare" },
+  { value: "https://www.gstatic.com/generate_204", label: "Google" },
+  { value: "https://cp.cloudflare.com/generate_204", label: "Cloudflare" },
 ];
 
 const CUSTOM = "custom";
@@ -353,7 +353,7 @@ export function SettingsSheet(p: Props) {
             </select>
           </Row>
           <Row icon={Icon.link()} title={t("testUrl")} hint={t("testUrlHint")}>
-            <PresetOrCustom value={s.testUrl} presets={TEST_URL_PRESETS} placeholder="http://…" onCommit={(v) => p.onChange({ testUrl: v })} />
+            <PresetOrCustom value={s.testUrl} presets={TEST_URL_PRESETS} placeholder="https://…" onCommit={(v) => p.onChange({ testUrl: v })} />
           </Row>
         </Group>
       </Section>

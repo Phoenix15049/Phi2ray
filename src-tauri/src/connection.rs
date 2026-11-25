@@ -2,7 +2,7 @@
 //!
 //! Leak protection rules:
 //! - When something fails while connected, the tunnel (or system proxy) stays in place and
-//!   only the broken part is restarted, so traffic stalls instead of leaking.
+//!   dependent routes are withdrawn before the connection is rebuilt.
 //! - With the kill switch on, the firewall stays up through every restart, and even after
 //!   giving up, until the user disconnects.
 
@@ -18,8 +18,7 @@ use serde_json::Value;
 use tauri::{AppHandle, Manager};
 
 use crate::parser::{wireguard, Profile, Protocol};
-use crate::probe::{self, ExitInfo, LocalProxy, Via};
-use crate::split::SplitMode;
+use crate::probe::{self, ExitInfo, LocalProxy};
 use crate::store::{Mode, Settings};
 use crate::xray::{SING_BOX_EXE, XRAY_EXE};
 use crate::{config, firewall, platform, proxy, tun, AppState};
@@ -121,15 +120,11 @@ impl TrafficMeter {
 /// The running connection: what the UI sees plus what's needed to restart its parts.
 pub struct Link {
     pub session: Session,
-    xray_cfg: Value,
-    tun_cfg: Option<Value>,
+    profile: Profile,
+    settings: Settings,
     test_url: String,
     metrics_port: u16,
-    /// xray's local listening ports, SOCKS first (what sing-box connects to).
     local_ports: Vec<u16>,
-    /// Probes go straight through the tunnel (VPN mode), testing the whole path apps use.
-    /// Not when split tunnelling only sends listed apps through it: Phi2ray itself isn't one.
-    probe_direct: bool,
     /// xray's probe inbound, which always goes to the server.
     probe_proxy: LocalProxy,
     /// The server as configured, and the IP xray dials when it was looked up beforehand.
@@ -138,19 +133,14 @@ pub struct Link {
     server_ip: Option<IpAddr>,
 }
 
-impl Link {
-    fn probe_via(&self) -> Via {
-        if self.probe_direct {
-            Via::Direct
-        } else {
-            Via::Proxy(self.probe_proxy.clone())
-        }
-    }
-}
-
 /// Phi2ray's own way through the server, for subscription downloads and DNS tests.
 pub fn internal_proxy(state: &AppState) -> Option<LocalProxy> {
-    state.link.lock().unwrap().as_ref().map(|l| l.probe_proxy.clone())
+    let (proxy, ports) = {
+        let link = state.link.lock().unwrap();
+        let link = link.as_ref().filter(|l| l.session.state == LinkState::Connected)?;
+        (link.probe_proxy.clone(), link.local_ports.clone())
+    };
+    state.core.lock().unwrap().xray_ready(&ports).then_some(proxy)
 }
 
 /// What the connection info lookup needs: a way through the server, and the server's IP.
@@ -164,10 +154,12 @@ pub struct InfoTarget {
 /// in every mode, split tunnel included. Resolving the server here uses the same DNS that
 /// xray itself used to reach it.
 pub fn info_target(state: &AppState) -> Result<InfoTarget, String> {
-    let (via, address, port, ip) = {
+    let via = internal_proxy(state).ok_or("The connection is not ready.")?;
+    let (address, port, ip) = {
         let link = state.link.lock().unwrap();
-        let link = link.as_ref().ok_or("Not connected.")?;
-        (link.probe_proxy.clone(), link.server_address.clone(), link.server_port, link.server_ip)
+        let link = link.as_ref().filter(|l| l.session.state == LinkState::Connected).ok_or("Not connected.")?;
+        if link.probe_proxy.port != via.port { return Err("The connection changed. Try again.".into()); }
+        (link.server_address.clone(), link.server_port, link.server_ip)
     };
     let ip = ip.or_else(|| resolve_server(state, &address, port).ok());
     Ok(InfoTarget { via, server_address: address, server_ip: ip })
@@ -199,6 +191,9 @@ fn connect_locked(app: &AppHandle, state: &AppState, id: &str) -> Result<Session
         return Err("Restore the previous Absolute settings before connecting. See Settings → Protection.".into());
     }
     if settings.absolute_mode { crate::absolute::validate_profile(&profile)?; }
+    if !settings.absolute_mode && profile.insecure().is_some() {
+        log(state, "[app] This profile has an unencrypted or unverified transport.");
+    }
     if profile.protocol == Protocol::Wireguard && settings.mode == Mode::Tun &&
         !settings.ipv6 && !wireguard::permits_ipv4(&profile)
     {
@@ -207,7 +202,6 @@ fn connect_locked(app: &AppHandle, state: &AppState, id: &str) -> Result<Session
     if !xray_exe.exists() {
         return Err(format!("Xray core not found. Put {XRAY_EXE} in {}", state.paths.core.display()));
     }
-    crate::verify_cached(state, &xray_exe)?;
     if settings.mode == Mode::Tun && !state.paths.sing_box().exists() {
         return Err(format!(
             "VPN mode needs {SING_BOX_EXE} in {}. Or switch to System proxy mode.",
@@ -216,9 +210,6 @@ fn connect_locked(app: &AppHandle, state: &AppState, id: &str) -> Result<Session
     }
     if settings.mode == Mode::Tun || settings.kill_switch {
         platform::elevate()?;
-    }
-    if settings.mode == Mode::Tun {
-        crate::verify_cached(state, &state.paths.sing_box())?;
     }
     if settings.absolute_mode {
         absolute_barrier(state, &settings, false)?;
@@ -251,8 +242,8 @@ fn connect_locked(app: &AppHandle, state: &AppState, id: &str) -> Result<Session
 
     // Stop the previous connection (its supervisor exits when the generation changes).
     state.generation.fetch_add(1, Ordering::SeqCst);
-    state.core.lock().unwrap().stop();
     restore_proxy(state);
+    state.core.lock().unwrap().stop();
     *state.link.lock().unwrap() = None;
 
     let mut result = start(state, &profile, &settings, &original_address, server_ip);
@@ -365,16 +356,13 @@ fn start(
     }
     let proxy = LocalProxy { port: probe_port, user: probe_user, pass: probe_pass };
     start_parts(state, settings, &xray_cfg, tun_cfg.as_ref(), &local_ports, &proxy)?;
-    let include_only = settings.split.rules().is_some() && settings.split.mode == SplitMode::Include;
-    let probe_direct = settings.mode == Mode::Tun && !include_only;
     Ok(Link {
         session,
-        xray_cfg,
-        tun_cfg,
+        profile: profile.clone(),
+        settings: settings.clone(),
         test_url: settings.test_url.clone(),
         metrics_port,
         local_ports,
-        probe_direct,
         probe_proxy: proxy,
         server_address: original_address.to_string(),
         server_port: profile.port,
@@ -510,15 +498,15 @@ pub fn shutdown(state: &AppState) -> Result<(), String> {
 /// Stops the connection but leaves the kill switch alone.
 pub(crate) fn teardown(state: &AppState) {
     state.generation.fetch_add(1, Ordering::SeqCst);
-    state.core.lock().unwrap().stop();
     restore_proxy(state);
+    state.core.lock().unwrap().stop();
     *state.link.lock().unwrap() = None;
 }
 
 /// Applies a kill switch change right away. The settings caller holds `state.switching`.
 pub fn apply_kill_switch(state: &AppState, settings: &Settings) -> Result<(), String> {
     let connected = state.link.lock().unwrap().is_some();
-    if settings.kill_switch && connected && !firewall::is_active() {
+    if settings.kill_switch && connected && !firewall::verified() {
         platform::elevate().map_err(|e| {
             if e == ADMIN_REQUIRED {
                 "The kill switch needs administrator rights. Restart Phi2ray as administrator.".to_string()
@@ -529,10 +517,10 @@ pub fn apply_kill_switch(state: &AppState, settings: &Settings) -> Result<(), St
         firewall::enable(&firewall_rules(state, settings))?;
         log(state, "[app] Kill switch on");
         // Only the cores' account gets past the kill switch, so an xray running as the user moves
-        // there, keeping its ports and credentials.
+        // there, using fresh private endpoints.
         #[cfg(not(windows))]
         if state.core.lock().unwrap().xray_is_local() {
-            restart(state, true, false)?;
+            restart(state)?;
         }
     } else if !settings.kill_switch && firewall::is_active() {
         firewall::disable()?;
@@ -540,22 +528,25 @@ pub fn apply_kill_switch(state: &AppState, settings: &Settings) -> Result<(), St
         log(state, "[app] Kill switch off");
     }
     if let Some(link) = state.link.lock().unwrap().as_mut() {
-        link.session.kill_switch = firewall::is_active();
+        link.session.kill_switch = firewall::verified();
     }
     Ok(())
 }
 
 /// Runs a health check now and records the result.
 pub fn check_now(state: &AppState) -> Result<Health, String> {
-    let (via, url, started_at) = {
+    let via = internal_proxy(state).ok_or("The connection is not ready.")?;
+    let (url, started_at) = {
         let link = state.link.lock().unwrap();
-        let link = link.as_ref().ok_or("Not connected.")?;
-        (link.probe_via(), link.test_url.clone(), link.session.started_at)
+        let link = link.as_ref().filter(|l| l.session.state == LinkState::Connected).ok_or("Not connected.")?;
+        if link.probe_proxy.port != via.port { return Err("The connection changed. Try again.".into()); }
+        (link.test_url.clone(), link.session.started_at)
     };
     let ms = probe::check(&url, &via);
     let health = Health { ok: ms.is_some(), ms, checked_at: now_ms() };
     let exit = ms.and_then(|_| probe::exit_info(&via));
-    if let Some(link) = state.link.lock().unwrap().as_mut().filter(|link| link.session.started_at == started_at) {
+    if let Some(link) = state.link.lock().unwrap().as_mut()
+        .filter(|link| link.session.started_at == started_at && link.probe_proxy.port == via.port) {
         link.session.health = Some(health.clone());
         if exit.is_some() {
             link.session.exit = exit;
@@ -573,6 +564,7 @@ fn supervise(app: AppHandle, generation: u64) {
     let mut meter = TrafficMeter::default();
     let mut traffic_warned = false;
     let mut next_absolute_check = Instant::now() + Duration::from_secs(60);
+    let mut next_firewall_check = Instant::now();
     // Restarts in a row that didn't bring traffic back.
     let mut fruitless_restarts = 0u32;
 
@@ -584,10 +576,30 @@ fn supervise(app: AppHandle, generation: u64) {
             return;
         }
 
-        // 1. Are both cores still running?
+        if Instant::now() >= next_firewall_check {
+            let Ok(_guard) = state.switching.try_lock() else { continue };
+            if !current() { return; }
+            next_firewall_check = Instant::now() + Duration::from_secs(5);
+            let protected = state.link.lock().unwrap().as_ref().is_some_and(|l| l.session.kill_switch);
+            if protected {
+                if let Err(error) = firewall::verify() {
+                    log(&state, format!("[app] Kill switch could not be verified: {error}"));
+                    set_state(&state, LinkState::Reconnecting);
+                    if let Err(error) = restart(&state) {
+                        log(&state, format!("[app] Could not restore the protected connection: {error}"));
+                    }
+                    need_exit_info = true;
+                    continue;
+                }
+            }
+        }
+
+        // 1. Are both cores still running and do local listeners still belong to Xray?
+        let Some((ports, mode)) = state.link.lock().unwrap().as_ref()
+            .map(|link| (link.local_ports.clone(), link.session.mode)) else { return; };
         let (xray_ok, tun_ok) = {
             let mut core = state.core.lock().unwrap();
-            (core.xray_alive(), core.tun_alive() != Some(false))
+            (core.xray_ready(&ports), mode != Mode::Tun || core.tun_alive() == Some(true))
         };
         if !xray_ok || !tun_ok {
             let Ok(_guard) = state.switching.try_lock() else { continue };
@@ -601,7 +613,7 @@ fn supervise(app: AppHandle, generation: u64) {
                 return;
             }
             set_state(&state, LinkState::Reconnecting);
-            match restart(&state, !xray_ok, !tun_ok) {
+            match restart(&state) {
                 Ok(()) => {
                     log(&state, format!("[app] {part} restarted"));
                     backoff = Duration::from_secs(1);
@@ -637,7 +649,7 @@ fn supervise(app: AppHandle, generation: u64) {
         // 3. Does traffic actually get through? (Probing can take seconds, so no locks held.)
         if state.store.lock().unwrap().settings.absolute_mode && Instant::now() >= next_absolute_check {
             let settings = state.store.lock().unwrap().settings.clone();
-            let proxy = state.link.lock().unwrap().as_ref().map(|l| l.probe_proxy.clone());
+            let proxy = state.link.lock().unwrap().as_ref().filter(|l| l.session.state == LinkState::Connected).map(|l| l.probe_proxy.clone());
             if let Some(proxy) = proxy {
                 let verification = crate::absolute::verify(&state, &proxy, &settings);
                 let Ok(_guard) = state.switching.try_lock() else { continue };
@@ -647,7 +659,7 @@ fn supervise(app: AppHandle, generation: u64) {
                     Err(e) => {
                         log(&state, format!("[absolute] {e}"));
                         set_state(&state, LinkState::Reconnecting);
-                        if let Err(e) = restart(&state, true, true) { log(&state, format!("[absolute] Revalidation failed: {e}")); }
+                        if let Err(e) = restart(&state) { log(&state, format!("[absolute] Revalidation failed: {e}")); }
                     }
                 }
             }
@@ -656,7 +668,7 @@ fn supervise(app: AppHandle, generation: u64) {
         if Instant::now() < next_check {
             continue;
         }
-        let Some((via, url)) = state.link.lock().unwrap().as_ref().map(|l| (l.probe_via(), l.test_url.clone())) else {
+        let Some((via, url)) = state.link.lock().unwrap().as_ref().map(|l| (l.probe_proxy.clone(), l.test_url.clone())) else {
             return;
         };
         let ms = probe::check(&url, &via);
@@ -705,7 +717,7 @@ fn supervise(app: AppHandle, generation: u64) {
             } else {
                 log(&state, format!("[app] Still no traffic: the server may be down or blocked. Restarting Xray again ({})", fruitless_restarts + 1));
             }
-            match restart(&state, true, false) {
+            match restart(&state) {
                 Ok(()) => need_exit_info = true,
                 Err(e) => log(&state, format!("[app] Restart failed: {e}")),
             }
@@ -715,55 +727,43 @@ fn supervise(app: AppHandle, generation: u64) {
     }
 }
 
-/// Restarts the failed parts of the current connection in place (same ports and credentials).
-fn restart(state: &AppState, xray: bool, tun: bool) -> Result<(), String> {
-    let (xray_cfg, tun_cfg, local_ports) = {
+/// Withdraw dependent routes before replacing Xray and rotate private endpoints on recovery.
+fn restart(state: &AppState) -> Result<(), String> {
+    let (profile, mut settings, address, ip, reconnects) = {
         let link = state.link.lock().unwrap();
         let link = link.as_ref().ok_or("Not connected.")?;
-        (link.xray_cfg.clone(), link.tun_cfg.clone(), link.local_ports.clone())
+        (link.profile.clone(), link.settings.clone(), link.server_address.clone(), link.server_ip, link.session.reconnects)
     };
-    let settings = crate::absolute::effective(&state.store.lock().unwrap().settings);
-    if settings.absolute_mode {
-        let proxy = state.link.lock().unwrap().as_ref().ok_or("Not connected")?.probe_proxy.clone();
-        let result = crate::verify_cached(state, &state.paths.xray())
-            .and_then(|_| crate::verify_cached(state, &state.paths.sing_box()))
-            .and_then(|_| start_parts(state, &settings, &xray_cfg, tun_cfg.as_ref(), &local_ports, &proxy));
-        if let Err(e) = &result {
-            let _ = absolute_barrier(state, &settings, false);
-            state.core.lock().unwrap().stop();
-            crate::absolute::phase(state, "error", Some(e.clone()));
-        } else if let Some(link) = state.link.lock().unwrap().as_mut() { link.session.reconnects += 1; }
-        return result;
+    {
+        let store = state.store.lock().unwrap();
+        settings.kill_switch = settings.absolute_mode || store.settings.kill_switch;
+        settings.connect_timeout = store.settings.connect_timeout;
     }
-    #[cfg(not(windows))]
-    let (xray, tun) = {
-        let helper_lost = state.core.lock().unwrap().uses_helper() && !crate::helper::running();
-        if helper_lost {
-            crate::helper::ensure()?;
-            // Both cores died with the helper; rebuild both without lifting the kill switch.
-            (true, tun_cfg.is_some())
-        } else {
-            (xray, tun)
+    let barrier = if settings.absolute_mode { absolute_barrier(state, &settings, false) } else { Ok(()) };
+    restore_proxy(state);
+    state.core.lock().unwrap().stop();
+    let result = (|| {
+        barrier?;
+        if settings.mode == Mode::Tun || settings.kill_switch { platform::elevate()?; }
+        if settings.kill_switch && !settings.absolute_mode { firewall::enable(&firewall_rules(state, &settings))?; }
+        start(state, &profile, &settings, &address, ip)
+    })();
+    match result {
+        Ok(mut link) => {
+            link.session.reconnects = reconnects.saturating_add(1);
+            *state.link.lock().unwrap() = Some(link);
+            Ok(())
         }
-    };
-    if xray {
-        crate::verify_cached(state, &state.paths.xray())?;
+        Err(e) => {
+            state.core.lock().unwrap().stop();
+            restore_proxy(state);
+            if settings.absolute_mode {
+                let _ = absolute_barrier(state, &settings, false);
+                crate::absolute::phase(state, "error", Some(e.clone()));
+            }
+            Err(e)
+        }
     }
-    if tun && tun_cfg.is_some() {
-        crate::verify_cached(state, &state.paths.sing_box())?;
-    }
-    let mut core = state.core.lock().unwrap();
-    if xray {
-        core.start_xray(&state.paths.xray(), &state.paths.core, &xray_cfg, &local_ports)?;
-    }
-    if let (true, Some(cfg)) = (tun, &tun_cfg) {
-        core.start_tun(&state.paths.sing_box(), &state.paths.work, cfg)?;
-    }
-    drop(core);
-    if let Some(link) = state.link.lock().unwrap().as_mut() {
-        link.session.reconnects += 1;
-    }
-    Ok(())
 }
 
 /// Auto-reconnect is off and a core died: stop, but keep blocking if the kill switch is on.
@@ -819,11 +819,12 @@ pub(crate) fn resolve_server(state: &AppState, address: &str, port: u16) -> Resu
     // Encrypted DNS first (through the current connection when there is one), so the network's
     // own DNS neither sees the server's name nor gets to answer it.
     let doh = tauri::async_runtime::block_on(crate::dns::resolve_bootstrap(address, internal_proxy(state).as_ref()));
+    let strict = state.store.lock().unwrap().settings.absolute_mode;
     let mut answered = !doh.is_empty();
     let mut found = public(doh);
     let now = now_ms() / 1000;
     if found.is_empty() {
-        // Then an address confirmed in the last few days, still without telling the network
+        // Then a recently resolved DNS address, still without telling the network
         // which server this is. Only after that, the network's own DNS.
         let recent = {
             let store = state.store.lock().unwrap();
@@ -831,13 +832,12 @@ pub(crate) fn resolve_server(state: &AppState, address: &str, port: u16) -> Resu
                 .resolved
                 .get(address)
                 .copied()
-                .filter(|_| store.resolved_at.get(address).is_some_and(|&t| now.saturating_sub(t) <= RESOLVED_RECENT_SECS))
+                .filter(|ip| !strict && crate::netinfo::is_public(*ip) && store.resolved_at.get(address).is_some_and(|&t| now.saturating_sub(t) <= RESOLVED_RECENT_SECS))
         };
         if let Some(ip) = recent {
-            log(state, "[app] Encrypted DNS didn't answer; using the server's recently confirmed address");
+            log(state, "[app] Encrypted DNS didn't answer; using the server's recently resolved address (not yet authenticated)");
             return Ok(ip);
         }
-        let strict = state.store.lock().unwrap().settings.absolute_mode;
         let system: Vec<IpAddr> = if strict { vec![] } else { (address, port).to_socket_addrs().map(|a| a.map(|a| a.ip()).collect()).unwrap_or_default() };
         answered |= !system.is_empty();
         found = public(system);
@@ -853,12 +853,12 @@ pub(crate) fn resolve_server(state: &AppState, address: &str, port: u16) -> Resu
             }
             Ok(ip)
         }
-        // Last resort: the last good address, unless it's too old to trust (servers move).
+        // Last resort: the previous DNS answer, unless it's too old to trust (servers move).
         None => store
             .resolved
             .get(address)
             .copied()
-            .filter(|_| store.resolved_at.get(address).is_some_and(|&t| now.saturating_sub(t) <= RESOLVED_MAX_AGE_SECS))
+            .filter(|ip| !strict && crate::netinfo::is_public(*ip) && store.resolved_at.get(address).is_some_and(|&t| now.saturating_sub(t) <= RESOLVED_MAX_AGE_SECS))
             .ok_or_else(|| {
                 if answered {
                     format!("DNS gave a fake address for {address} (it's probably filtered). Try another DNS or connect once on a network where it works.")

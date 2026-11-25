@@ -10,8 +10,8 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
+use std::io::{Read, Write};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::sync::{Mutex, OnceLock};
@@ -99,23 +99,43 @@ fn keyring(create: bool) -> Result<Option<Secret>, String> {
 
 fn file_key(create: bool) -> Result<Option<Secret>, String> {
     let path = key_file()?;
-    match fs::read(&path) {
-        Ok(bytes) => Secret::try_from(bytes.as_slice()).map(Some).map_err(|_| "the key file isn't valid".to_string()),
-        Err(_) if !create => Ok(None),
-        Err(_) => {
+    let uid = unsafe { libc::geteuid() };
+    let directory = fs::symlink_metadata(path.parent().ok_or("Missing key directory")?).map_err(|e| e.to_string())?;
+    if !directory.is_dir() || directory.uid() != uid || directory.mode() & 0o022 != 0 {
+        return Err("The key directory must belong to you and cannot be writable by other users.".into());
+    }
+    let file = fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(&path);
+    match file {
+        Ok(file) => {
+            let meta = file.metadata().map_err(|e| e.to_string())?;
+            if !meta.is_file() || meta.uid() != uid || meta.mode() & 0o077 != 0 || meta.len() != KEY_LEN as u64 {
+                return Err("The key file must be a private regular file owned by your account.".into());
+            }
+            let mut bytes = Vec::with_capacity(KEY_LEN + 1);
+            file.take((KEY_LEN + 1) as u64).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+            Secret::try_from(bytes.as_slice()).map(Some).map_err(|_| "the key file isn't valid".to_string())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && !create => Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             crate::platform::check_write_target(&path)?;
             let mut key = [0u8; KEY_LEN];
             rand::thread_rng().fill_bytes(&mut key);
             let mut file = fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
+                .custom_flags(libc::O_NOFOLLOW)
                 .mode(0o600)
                 .open(&path)
                 .map_err(|e| format!("cannot create {}: {e}", path.display()))?;
             file.write_all(&key).map_err(|e| e.to_string())?;
             Ok(Some(key))
         }
+        Err(e) => Err(format!("Cannot safely open the store key: {e}")),
     }
+}
+
+pub(crate) fn uses_file_key() -> bool {
+    cached(Kind::File).is_some()
 }
 
 /// The key for writing: the one already in use, else the keyring, else a key file.
@@ -126,13 +146,14 @@ fn current_key() -> Result<(Kind, Secret), String> {
         }
     }
     // A key file means this system has no keyring; keep using it.
-    if let Ok(Some(key)) = file_key(false) {
+    if let Some(key) = file_key(false)? {
         return Ok((Kind::File, remember(Kind::File, key)));
     }
     match keyring(true) {
         Ok(Some(key)) => Ok((Kind::Keyring, remember(Kind::Keyring, key))),
         _ => {
             let key = file_key(true)?.ok_or("no key")?;
+            eprintln!("Phi2ray: Store encryption uses a local key file. Keep it separate from store backups.");
             Ok((Kind::File, remember(Kind::File, key)))
         }
     }
@@ -144,7 +165,10 @@ fn key_for(kind: Kind) -> Result<Secret, String> {
     }
     let found = match kind {
         Kind::Keyring => keyring(false).map_err(|_| KEY_UNAVAILABLE.to_string())?,
-        Kind::File => file_key(false)?,
+        Kind::File => file_key(false).map_err(|error| {
+            eprintln!("Phi2ray: {error}");
+            KEY_UNAVAILABLE.to_string()
+        })?,
     };
     found.map(|key| remember(kind, key)).ok_or_else(|| KEY_UNAVAILABLE.to_string())
 }

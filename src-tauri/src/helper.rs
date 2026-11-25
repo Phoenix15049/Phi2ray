@@ -255,6 +255,10 @@ pub fn kill_switch(on: bool, allow_lan: bool) -> Result<(), String> {
     expect_done(require()?.call(Command::KillSwitch { on, allow_lan }, CALL_TIMEOUT)?)
 }
 
+pub fn verify_kill_switch() -> Result<(), String> {
+    expect_done(require()?.call(Command::VerifyKillSwitch, CALL_TIMEOUT)?)
+}
+
 /// The helper to run: the one from the package, or the AppImage's own copy.
 fn locate() -> Result<PathBuf, String> {
     let installed = Path::new(INSTALLED).join(HELPER);
@@ -276,35 +280,40 @@ fn locate() -> Result<PathBuf, String> {
 /// be swapped. So the helper and cores are streamed into `/opt/phi2ray`, which belongs to root,
 /// the first time they're needed and after an update. This asks for the password once more.
 fn install_from_appimage(app_dir: &Path) -> Result<(), String> {
-    let version = env!("CARGO_PKG_VERSION");
+    let version = format!("{}:{VERSION}", env!("CARGO_PKG_VERSION"));
     let target = Path::new(APPIMAGE_INSTALLED);
     if std::fs::read_to_string(target.join("VERSION")).is_ok_and(|v| v.trim() == version) {
         return Ok(());
     }
+    const PAYLOAD: &[&str] = &["phi2ray-helper", "xray", "sing-box", "libcronet.so", "geoip.dat", "geosite.dat", "com.phi2ray.helper.policy"];
     const SCRIPT: &str = r#"set -e
-new=/opt/phi2ray.new
-rm -rf "$new"
-mkdir -p "$new"
-tar -xf - -C "$new" --no-same-owner
-chown -R root:root "$new"
-chmod -R go-w "$new"
+version="$1"
+shift
+new="$(mktemp -d /opt/phi2ray.XXXXXX)"
+trap 'rm -rf -- "$new"' EXIT
+tar -xf - -C "$new" --no-same-owner --no-same-permissions -- "$@"
+for file in "$@"; do
+    test -f "$new/$file" && test ! -L "$new/$file" || exit 1
+done
+chmod 755 "$new" "$new/phi2ray-helper" "$new/xray" "$new/sing-box"
+chmod 644 "$new/libcronet.so" "$new/geoip.dat" "$new/geosite.dat" "$new/com.phi2ray.helper.policy"
 if [ -f "$new/com.phi2ray.helper.policy" ] && [ -d /usr/share/polkit-1/actions ]; then
     install -m 644 "$new/com.phi2ray.helper.policy" /usr/share/polkit-1/actions/
 fi
-printf '%s\n' "$1" > "$new/VERSION"
+printf '%s\n' "$version" > "$new/VERSION"
 rm -rf /opt/phi2ray
 mv "$new" /opt/phi2ray
 "#;
     let mut tar = host_command("tar")
         .arg("-C")
         .arg(app_dir.join("usr/lib/phi2ray"))
-        .args(["-cf", "-", "."])
+        .args(["-cf", "-", "--"]).args(PAYLOAD)
         .stdout(Stdio::piped())
         .spawn()
         .map_err(|e| format!("Cannot read the AppImage: {e}"))?;
     let files = tar.stdout.take().ok_or("Cannot read the AppImage.")?;
     let status = host_command("pkexec")
-        .args(["/bin/sh", "-c", SCRIPT, "sh", version])
+        .args(["/bin/sh", "-c", SCRIPT, "sh", &version]).args(PAYLOAD)
         .stdin(Stdio::from(files))
         .stdout(Stdio::null())
         .stderr(Stdio::null())

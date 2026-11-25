@@ -9,6 +9,7 @@ mod config;
 mod connection;
 mod console;
 mod cores;
+mod core_hashes;
 mod delay;
 mod dns;
 mod firewall;
@@ -29,11 +30,10 @@ mod tray;
 mod tun;
 mod xray;
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use rand::Rng;
 use serde::Serialize;
@@ -71,12 +71,10 @@ impl Paths {
     }
 }
 
-/// A core binary's identity when its hash was last checked.
-type FileStamp = (Option<SystemTime>, u64);
-
 pub(crate) struct AppState {
     absolute: Mutex<absolute::Status>,
     absolute_guard: Mutex<Option<std::process::Child>>,
+    delay_testing: AtomicBool,
     store: Mutex<Store>,
     core: Mutex<Core>,
     link: Mutex<Option<Link>>,
@@ -87,7 +85,6 @@ pub(crate) struct AppState {
     logs: Logs,
     /// Serializes connect, disconnect and supervisor restarts.
     switching: Mutex<()>,
-    verified: Mutex<HashMap<PathBuf, FileStamp>>,
     /// Why the bundled cores couldn't be unpacked, shown to the user.
     core_error: Option<String>,
     paths: Paths,
@@ -387,7 +384,8 @@ pub(crate) async fn add_subscription_url(app: &AppHandle, url: &str) -> Result<S
     if state.store.lock().unwrap().groups.iter().any(|g| g.subscription.as_ref().is_some_and(|s| s.url == url)) {
         return Err("This subscription is already added.".into());
     }
-    let fetched = subscription::fetch(&url, proxy_port(&state).as_ref()).await?;
+    let proxy = proxy_port(&state)?;
+    let fetched = subscription::fetch(&url, proxy.as_ref()).await?;
 
     let id = new_id();
     let name = fetched.title.clone().unwrap_or_else(|| {
@@ -423,7 +421,10 @@ async fn refresh_subscription(app: &AppHandle, id: &str) -> Result<SubscriptionR
         let group = store.group(id).ok_or("That group no longer exists.")?;
         group.subscription.as_ref().ok_or("This group isn't a subscription.")?.url.clone()
     };
-    let fetched = subscription::fetch(&url, proxy_port(&state).as_ref()).await;
+    let fetched = match proxy_port(&state) {
+        Ok(proxy) => subscription::fetch(&url, proxy.as_ref()).await,
+        Err(error) => Err(error),
+    };
 
     edit_library(&state, |store| {
         let sub = store.group_mut(id).and_then(|g| g.subscription.as_mut()).ok_or("This group was removed during the update.")?;
@@ -492,8 +493,13 @@ async fn subscription_updater(app: AppHandle) {
 
 /// When connected, subscription downloads go through the connection, always to the server
 /// (split tunnel rules don't apply to Phi2ray's own requests).
-fn proxy_port(state: &AppState) -> Option<probe::LocalProxy> {
-    connection::internal_proxy(state)
+fn proxy_port(state: &AppState) -> Result<Option<probe::LocalProxy>, String> {
+    if let Some(proxy) = connection::internal_proxy(state) { return Ok(Some(proxy)); }
+    if state.link.lock().unwrap().is_some() || state.blocked.load(Ordering::SeqCst)
+        || state.store.lock().unwrap().settings.absolute_mode || absolute::marker(state).exists() {
+        return Err("Wait until the protected connection is ready.".into());
+    }
+    Ok(None)
 }
 
 // ---------- Settings ----------
@@ -529,6 +535,9 @@ pub(crate) fn edit_settings(
         (store.settings.kill_switch != settings.kill_switch, store.settings.console != settings.console)
     };
     let absolute_changed = previous.absolute_mode != settings.absolute_mode;
+    if absolute_changed && settings.absolute_mode && state.delay_testing.load(Ordering::SeqCst) {
+        return Err("Wait for the server tests to finish before enabling Absolute.".into());
+    }
     if previous.absolute_mode && settings.absolute_mode
         && previous.absolute_browser_location != settings.absolute_browser_location
     {
@@ -563,14 +572,8 @@ pub(crate) fn edit_settings(
                 return Err(e);
             }
         }
-    } else if kill_switch_changed && !settings.absolute_mode && !recovery_pending {
-        connection::apply_kill_switch(state, &settings)?;
     }
-    if console_changed {
-        console::apply(app, settings.console)?;
-    }
-    apply_window_settings(app, &settings);
-    state.logs.lock().unwrap().set_limit(settings.log_lines as usize);
+    let change_firewall = kill_switch_changed && !settings.absolute_mode && !recovery_pending && !release_absolute;
     let mut store = state.store.lock().unwrap();
     store.settings = settings.clone();
     if let Err(e) = store.save(&state.paths.store) {
@@ -580,6 +583,33 @@ pub(crate) fn edit_settings(
         return Err(e);
     }
     drop(store);
+    let applied = (|| {
+        if console_changed { console::apply(app, settings.console)?; }
+        if change_firewall { connection::apply_kill_switch(state, &settings)?; }
+        Ok::<_, String>(())
+    })();
+    if let Err(error) = applied {
+        let persisted = {
+            let mut store = state.store.lock().unwrap();
+            store.settings = previous.clone();
+            store.save(&state.paths.store).is_ok()
+        };
+        let console_restored = !console_changed || console::apply(app, previous.console).is_ok();
+        let firewall_restored = !change_firewall || connection::apply_kill_switch(state, &previous).is_ok();
+        if absolute_changed || release_absolute {
+            absolute::phase(state, "error", Some(error.clone()));
+        }
+        if !firewall_restored {
+            connection::log(state, "[app] Previous kill-switch state could not be restored.");
+            state.blocked.store(firewall::is_active(), Ordering::SeqCst);
+        }
+        if !(console_restored && firewall_restored && persisted) {
+            return Err(format!("{error} Some previous settings could not be restored."));
+        }
+        return Err(error);
+    }
+    apply_window_settings(app, &settings);
+    state.logs.lock().unwrap().set_limit(settings.log_lines as usize);
     if release_absolute {
         if let Err(e) = firewall::disable() {
             absolute::phase(state, "error", Some(e.clone()));
@@ -601,17 +631,22 @@ fn apply_window_settings(app: &AppHandle, settings: &Settings) {
 /// Tests DNS-over-HTTPS servers. When connected, through the connection, as VPN mode uses them.
 #[tauri::command]
 async fn ping_dns(app: AppHandle, servers: Vec<String>) -> Result<Vec<Option<u32>>, String> {
-    let proxy = proxy_port(&app.state::<AppState>());
-    let tasks: Vec<_> = servers
-        .into_iter()
-        .map(|server| {
-            let proxy = proxy.clone();
-            tauri::async_runtime::spawn(async move { dns::ping(&server, proxy.as_ref()).await.ok().flatten() })
-        })
-        .collect();
-    let mut results = Vec::new();
-    for task in tasks {
-        results.push(task.await.ok().flatten());
+    static DNS_BATCH: Semaphore = Semaphore::const_new(1);
+    let batch_guard = Arc::new(DNS_BATCH.try_acquire().map_err(|_| "A DNS test is already in progress.")?);
+    if servers.len() > 16 { return Err("A DNS test accepts up to 16 servers.".into()); }
+    let state = app.state::<AppState>();
+    let proxy = proxy_port(&state)?;
+    let mut results = Vec::with_capacity(servers.len());
+    for batch in servers.chunks(4) {
+        let tasks: Vec<_> = batch.iter().map(|server| {
+            let (server, proxy) = (server.clone(), proxy.clone());
+            let guard = batch_guard.clone();
+            tauri::async_runtime::spawn(async move {
+                let _guard = guard;
+                dns::ping(&server, proxy.as_ref()).await.ok().flatten()
+            })
+        }).collect();
+        for task in tasks { results.push(task.await.ok().flatten()); }
     }
     Ok(results)
 }
@@ -673,7 +708,7 @@ async fn status(app: AppHandle) -> Result<Status, String> {
         absolute: state.absolute.lock().unwrap().clone(),
         absolute_supported: cfg!(windows),
         session: state.link.lock().unwrap().as_ref().map(|l| l.session.clone()),
-        firewall: firewall::is_active(),
+        firewall: firewall::verified(),
         blocked: state.blocked.load(Ordering::SeqCst),
         xray_found: state.paths.xray().exists(),
         tun_found: state.paths.sing_box().exists(),
@@ -742,30 +777,38 @@ pub(crate) async fn run_delay_tests(
     ids: Vec<String>,
     on_result: impl Fn(&DelayResult) + Send + Sync + 'static,
 ) -> Result<(), String> {
-    let (profiles, target, exe, assets) = blocking(app.clone(), move |_, state| -> Result<_, String> {
+    struct Batch(AppHandle);
+    impl Drop for Batch {
+        fn drop(&mut self) { self.0.state::<AppState>().delay_testing.store(false, Ordering::SeqCst); }
+    }
+    let (profiles, target, exe, assets, batch) = blocking(app.clone(), move |app, state| -> Result<_, String> {
+        let _switching = state.switching.lock().unwrap();
+        let store = state.store.lock().unwrap();
+        if store.settings.absolute_mode || absolute::marker(state).exists() || state.absolute.lock().unwrap().phase == "error" {
+            return Err("Direct server tests are unavailable while Absolute protection is on.".into());
+        }
         let exe = state.paths.xray();
         if !exe.exists() {
             return Err(format!("Xray core not found. Put {XRAY_EXE} in {}", state.paths.core.display()));
         }
-        verify_cached(state, &exe)?;
-        let store = state.store.lock().unwrap();
         let target = delay::TestTarget::parse(&store.settings.test_url)?;
-        let profiles: Vec<Profile> =
-            store.profiles.iter().filter(|p| ids.is_empty() || ids.contains(&p.id)).cloned().collect();
-        Ok((profiles, target, exe, state.paths.core.clone()))
-    })
-    .await??;
+        let ids: std::collections::HashSet<_> = ids.into_iter().collect();
+        let profiles: Vec<Profile> = store.profiles.iter()
+            .filter(|p| ids.is_empty() || ids.contains(&p.id)).cloned().collect();
+        if state.delay_testing.swap(true, Ordering::SeqCst) {
+            return Err("A server test is already in progress.".into());
+        }
+        Ok((profiles, target, exe, state.paths.core.clone(), Arc::new(Batch(app.clone()))))
+    }).await??;
 
     let target = Arc::new(target);
-    let limit = Arc::new(Semaphore::new(DELAY_TEST_PARALLEL));
     let on_result = Arc::new(on_result);
-    let tasks: Vec<_> = profiles
-        .into_iter()
-        .map(|p| {
-            let (app, exe, assets, target, limit) = (app.clone(), exe.clone(), assets.clone(), target.clone(), limit.clone());
+    for profiles in profiles.chunks(DELAY_TEST_PARALLEL) {
+        let tasks: Vec<_> = profiles.iter().cloned().map(|p| {
+            let (app, exe, assets, target, batch) = (app.clone(), exe.clone(), assets.clone(), target.clone(), batch.clone());
             let on_result = on_result.clone();
             tauri::async_runtime::spawn(async move {
-                let _permit = limit.acquire_owned().await;
+                let _batch = batch;
                 let id = p.id.clone();
                 let prepared = if p.protocol == parser::Protocol::Wireguard && p.address.parse::<std::net::IpAddr>().is_err() {
                     blocking(app.clone(), move |_, state| {
@@ -780,10 +823,8 @@ pub(crate) async fn run_delay_tests(
                 on_result(&result);
                 let _ = app.emit("delay", result);
             })
-        })
-        .collect();
-    for task in tasks {
-        let _ = task.await;
+        }).collect();
+        for task in tasks { let _ = task.await; }
     }
     Ok(())
 }
@@ -794,7 +835,7 @@ async fn about(app: AppHandle) -> Result<AboutInfo, String> {
     blocking(app, move |_, state| {
         // Only run a core binary after its hash check passed.
         let core_version = |exe: PathBuf| {
-            (exe.exists() && verify_cached(state, &exe).is_ok()).then(|| xray::version(&exe)).flatten()
+            xray::version(&exe)
         };
         AboutInfo {
             app: version,
@@ -814,26 +855,6 @@ fn relaunch_as_admin(app: AppHandle) -> Result<(), String> {
     if cfg!(windows) {
         app.exit(0);
     }
-    Ok(())
-}
-
-/// Checks a core's hash once per file version instead of re-reading it on every use.
-fn verify_cached(state: &AppState, exe: &Path) -> Result<(), String> {
-    if cores::EMBEDDED {
-        // Verified at startup and locked against changes since, so nothing to re-check.
-        return if cores::trusted(exe) {
-            Ok(())
-        } else {
-            Err(format!("{} didn't pass the integrity check. Restart Phi2ray.", exe.display()))
-        };
-    }
-    let meta = std::fs::metadata(exe).map_err(|e| format!("Cannot read {}: {e}", exe.display()))?;
-    let stamp = (meta.modified().ok(), meta.len());
-    if state.verified.lock().unwrap().get(exe) == Some(&stamp) {
-        return Ok(());
-    }
-    xray::verify(exe)?;
-    state.verified.lock().unwrap().insert(exe.to_path_buf(), stamp);
     Ok(())
 }
 
@@ -957,12 +978,17 @@ pub fn run() {
             }
             let recovery_error = absolute::recover(&paths.data.join("absolute-backup.json")).err();
             let store = Store::load(&paths.store);
+            #[cfg(not(windows))]
+            if store::uses_file_key() {
+                logs.lock().unwrap().push("[app] Store encryption uses a local key file. Keep it separate from store backups.".into());
+            }
             let absolute_enabled = store.settings.absolute_mode;
             let core_error = core_error.or_else(|| {
                 store.locked.then(|| "Your saved servers are locked. Unlock your keyring and restart Phi2ray.".to_string())
             });
             app.manage(AppState {
                 absolute_guard: Mutex::new(None),
+                delay_testing: AtomicBool::new(false),
                 absolute: Mutex::new(absolute::Status {phase: if recovery_error.is_some() {"error"} else if absolute_enabled {"armed"} else {"off"}.into(), error: recovery_error, ..Default::default()}),
                 store: Mutex::new(store),
                 core: Mutex::new(Core::new(logs.clone())),
@@ -971,7 +997,6 @@ pub fn run() {
                 blocked: AtomicBool::new(blocked),
                 logs,
                 switching: Mutex::new(()),
-                verified: Mutex::new(HashMap::new()),
                 core_error,
                 paths,
             });

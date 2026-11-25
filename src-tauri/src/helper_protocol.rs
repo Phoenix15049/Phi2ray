@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Bumped when a request or message changes in a way the other side can't read.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 /// Largest request accepted: a config, with room to spare.
 pub const MAX_REQUEST: u64 = 8 * 1024 * 1024;
 /// The VPN adapter's name.
@@ -48,6 +48,7 @@ pub enum Command {
     StartTest { config: String, port: u16 },
     StopTest { test: u64 },
     KillSwitch { on: bool, allow_lan: bool },
+    VerifyKillSwitch,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -96,18 +97,18 @@ table inet phi2ray {{
         oifname "lo" accept
         oifname "{TUN_NAME}" accept
         meta skuid {core_uid} accept
-        udp sport 68 udp dport 67 accept
-        udp sport 546 udp dport 547 accept
-        ip6 daddr {{ fe80::/10, ff00::/8 }} accept
+        meta nfproto ipv4 udp sport 68 udp dport 67 accept
+        ip6 daddr {{ fe80::/10, ff02::1:2 }} udp sport 546 udp dport 547 accept
+        ip6 hoplimit 255 icmpv6 type {{ nd-router-solicit, nd-neighbor-solicit, nd-neighbor-advert }} accept
 {lan_out}    }}
     chain input {{
         type filter hook input priority -10; policy drop;
         iifname "lo" accept
         iifname "{TUN_NAME}" accept
         ct state established,related accept
-        udp sport 67 udp dport 68 accept
-        udp sport 547 udp dport 546 accept
-        ip6 saddr fe80::/10 accept
+        meta nfproto ipv4 udp sport 67 udp dport 68 accept
+        ip6 saddr fe80::/10 udp sport 547 udp dport 546 accept
+        ip6 hoplimit 255 icmpv6 type {{ nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert }} accept
 {lan_in}    }}
     chain forward {{
         type filter hook forward priority -10; policy drop;

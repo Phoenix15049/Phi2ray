@@ -159,7 +159,9 @@ impl Profile {
                 Protocol::Shadowsocks => matches!(self.method.as_str(), "none" | "plain"),
                 Protocol::Wireguard => false,
             };
-        if plain {
+        let download_unencrypted = matches!(self.protocol, Protocol::Vless | Protocol::Vmess | Protocol::Trojan | Protocol::Shadowsocks | Protocol::Http | Protocol::Socks)
+            && self.stream.options.as_ref().is_some_and(custom::unencrypted_download);
+        if plain || download_unencrypted {
             Some("unencrypted")
         } else if s.security == "tls" && s.allow_insecure {
             Some("unverified")

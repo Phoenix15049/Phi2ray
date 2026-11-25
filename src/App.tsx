@@ -515,6 +515,10 @@ export default function App() {
 
   const testProfiles = async (ids: string[]) => {
     if (testing || !ids.length) return;
+    if (settings.absoluteMode || status.absolute.error) {
+      toast("info", t("absoluteDelayUnavailable"));
+      return;
+    }
     setTesting(true);
     setDelays((d) => ({ ...d, ...Object.fromEntries(ids.map((id) => [id, "testing" as Delay])) }));
     try {

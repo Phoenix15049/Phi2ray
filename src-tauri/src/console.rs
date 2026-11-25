@@ -253,7 +253,7 @@ fn status(app: &AppHandle, state: &AppState) -> StatusView {
         .into(),
         server,
         mode: mode_name(session.map_or(store.settings.mode, |s| s.mode)).into(),
-        kill_switch: crate::firewall::is_active() || store.settings.kill_switch,
+        kill_switch: crate::firewall::verified(),
         blocked: state.blocked.load(Ordering::SeqCst),
         healthy: session.and_then(|s| s.health.as_ref()).map(|h| h.ok),
         latency_ms: session.and_then(|s| s.health.as_ref()).and_then(|h| h.ms),
@@ -647,9 +647,7 @@ mod pipe {
             }
             if ACTIVE.fetch_add(1, Ordering::SeqCst) >= MAX_CLIENTS {
                 ACTIVE.fetch_sub(1, Ordering::SeqCst);
-                let mut file = into_file(client);
-                let _ = reply(&mut file, &Reply::Failed { error: "Phi2ray is busy with other commands. Try again.".into() });
-                finish(file);
+                // A busy client must not be able to stall the accept loop.
                 continue;
             }
             let hooks = hooks.clone();
@@ -687,6 +685,7 @@ mod pipe {
         let deadline = Instant::now() + REQUEST_TIMEOUT;
         let mut data = Vec::new();
         loop {
+            if Instant::now() >= deadline { return None; }
             let mut available = 0u32;
             let ok = unsafe {
                 PeekNamedPipe(file.as_raw_handle() as HANDLE, null_mut(), 0, null_mut(), &mut available, null_mut())
@@ -695,14 +694,12 @@ mod pipe {
                 return None;
             }
             if available == 0 {
-                if Instant::now() > deadline {
-                    return None;
-                }
                 thread::sleep(Duration::from_millis(10));
                 continue;
             }
             let mut buf = vec![0u8; available.min(BUFFER) as usize];
             let n = file.read(&mut buf).ok()?;
+            if n == 0 { return None; }
             data.extend_from_slice(&buf[..n]);
             if let Some(end) = data.iter().position(|&b| b == b'\n') {
                 data.truncate(end);

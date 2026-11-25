@@ -194,11 +194,12 @@ TUIC are not supported by this importer.
   `supplementalMetadata.xml`, `bcp47/timezone.xml`); see
   [Unicode license](src-tauri/src/windows-time-zones.LICENSE).
 
-- **Kill switch.** Firewall rules let nothing out except the tunnel, even while it reconnects or
-  switches servers. If Phi2ray crashes the block stays, so nothing leaks: open Phi2ray to reconnect
-  or unblock. Restarting your computer clears the ordinary kill switch; Absolute rules persist.
-- **Reconnecting without letting go.** Only the broken piece restarts. Your apps wait a few seconds
-  instead of falling back to your real connection.
+- **Kill switch.** Phi2ray checks the installed firewall rules while connected and rebuilds a
+  protected connection if the check fails. A crash leaves the rules in place. Restarting clears
+  the ordinary kill switch. Absolute rules persist until explicitly released.
+- **Protected reconnection.** Phi2ray withdraws the old proxy and adapter before replacing Xray.
+  Automatic ports and credentials are refreshed. Health and exit checks run through the private
+  proxy independently of split rules. Direct server tests are unavailable while Absolute is on.
 - **DNS through the tunnel**, over HTTPS, with a *Test* button to find the fastest server.
 - **Connection info** (the globe button) compares geolocation from ipapi.co, FreeIPAPI and IPQuery
   with Cloudflare's exit report. It shows IP reputation as 100 minus the risk estimate from

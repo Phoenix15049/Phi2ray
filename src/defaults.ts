@@ -27,7 +27,7 @@ export const DEFAULT_SETTINGS: Settings = {
   httpPort: 10809,
   logLevel: "warning",
   logLines: 1000,
-  testUrl: "http://www.gstatic.com/generate_204",
+  testUrl: "https://www.gstatic.com/generate_204",
   language: "en",
   theme: "system",
   alwaysOnTop: false,

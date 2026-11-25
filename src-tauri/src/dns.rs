@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use base64::Engine;
 
 const TIMEOUT: Duration = Duration::from_secs(6);
+const MAX_DNS_BODY: usize = 65_535;
 /// Looked up during the test.
 const TEST_NAME: &str = "www.google.com";
 
@@ -18,14 +19,15 @@ pub async fn ping(address: &str, proxy: Option<&crate::probe::LocalProxy>) -> Re
         return Err("Only DNS-over-HTTPS servers can be tested.".into());
     }
 
-    let mut client = reqwest::Client::builder().timeout(TIMEOUT);
+    let mut client = reqwest::Client::builder().timeout(TIMEOUT).redirect(reqwest::redirect::Policy::none());
     client = match proxy {
         Some(p) => client.proxy(p.for_reqwest()?),
         None => client.no_proxy(),
     };
     let client = client.build().map_err(|e| e.to_string())?;
 
-    let query = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(query_packet(TEST_NAME));
+    let packet = query_packet(TEST_NAME);
+    let query = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&packet);
     let mut request_url = url.clone();
     request_url.query_pairs_mut().append_pair("dns", &query);
 
@@ -34,7 +36,8 @@ pub async fn ping(address: &str, proxy: Option<&crate::probe::LocalProxy>) -> Re
     for _ in 0..2 {
         let start = Instant::now();
         let ok = match client.get(request_url.clone()).header("accept", "application/dns-message").send().await {
-            Ok(resp) if resp.status().is_success() => resp.bytes().await.map(|b| is_answer(&b)).unwrap_or(false),
+            Ok(resp) => crate::probe::bounded_body(resp, MAX_DNS_BODY).await
+                .is_some_and(|b| matches_question(&b, &packet) && is_answer(&b)),
             _ => false,
         };
         if !ok {
@@ -61,23 +64,28 @@ pub async fn resolve_bootstrap(name: &str, proxy: Option<&crate::probe::LocalPro
     if !valid {
         return Vec::new();
     }
-    let mut client = reqwest::Client::builder().timeout(BOOTSTRAP_TIMEOUT);
+    let mut client = reqwest::Client::builder().timeout(BOOTSTRAP_TIMEOUT).redirect(reqwest::redirect::Policy::none());
     client = match proxy.map(|p| p.for_reqwest()) {
         Some(Ok(p)) => client.proxy(p),
-        _ => client.no_proxy(),
+        Some(Err(_)) => return Vec::new(),
+        None => client.no_proxy(),
     };
     let Ok(client) = client.build() else { return Vec::new() };
-    let query = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(query_packet(name));
+    let packet = std::sync::Arc::new(query_packet(name));
+    let query = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(packet.as_slice());
     let (tx, mut rx) = tokio::sync::mpsc::channel(BOOTSTRAP_DOH.len());
     for server in BOOTSTRAP_DOH {
         let (client, url, tx) = (client.clone(), format!("{server}?dns={query}"), tx.clone());
+        let packet = packet.clone();
         tauri::async_runtime::spawn(async move {
             let ask = async {
                 let resp = client.get(url).header("accept", "application/dns-message").send().await.ok()?;
                 if !resp.status().is_success() {
                     return None;
                 }
-                let ips = a_records(&resp.bytes().await.ok()?)?;
+                let response = crate::probe::bounded_body(resp, MAX_DNS_BODY).await?;
+                if !matches_question(&response, &packet) { return None; }
+                let ips = a_records(&response)?;
                 (!ips.is_empty()).then_some(ips)
             };
             let _ = tx.send(ask.await).await;
@@ -102,21 +110,17 @@ pub async fn blocklisted(client: &reqwest::Client, name: &str) -> Option<bool> {
     let packet = query_packet(name);
     let query = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&packet);
     let url = format!("{}?dns={query}", BOOTSTRAP_DOH[0]);
-    let mut resp = client.get(url).header("accept", "application/dns-message").send().await.ok()?;
-    if !resp.status().is_success() {
-        return None;
-    }
-    let mut body = Vec::new();
-    while let Some(chunk) = resp.chunk().await.ok()? {
-        if body.len() + chunk.len() > 65_535 { return None; }
-        body.extend_from_slice(&chunk);
-    }
-    let question = packet.get(12..)?;
-    if body.get(0..2) != Some(&packet[0..2]) || body.get(4..6) != Some(&packet[4..6])
-        || !body.get(12..).is_some_and(|bytes| bytes.starts_with(question)) {
-        return None;
-    }
+    let response = client.get(url).header("accept", "application/dns-message").send().await.ok()?;
+    let body = crate::probe::bounded_body(response, MAX_DNS_BODY).await?;
+    if !matches_question(&body, &packet) { return None; }
     blocklist_answer(&body)
+}
+
+fn matches_question(response: &[u8], query: &[u8]) -> bool {
+    response.get(0..2) == query.get(0..2)
+        && response.get(4..6) == query.get(4..6)
+        && response.get(12..).zip(query.get(12..))
+            .is_some_and(|(body, question)| body.get(..question.len()).is_some_and(|q| q.eq_ignore_ascii_case(question)))
 }
 
 /// NXDOMAIN means not listed and a 127.x answer means listed. 127.255.x is how lists refuse

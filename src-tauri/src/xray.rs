@@ -4,7 +4,6 @@
 
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpStream;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -12,7 +11,6 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 
 #[cfg(windows)]
 pub const XRAY_EXE: &str = "xray.exe";
@@ -119,6 +117,7 @@ impl Core {
         if let Some(old) = self.xray.take() {
             stop(old);
         }
+        verify(exe)?;
         let mut cmd = Command::new(exe);
         cmd.args(["run", "-format", "json", "-c", "stdin:"]).env("XRAY_LOCATION_ASSET", asset_dir);
         let mut child = self.launch("xray", cmd, &config.to_string())?;
@@ -135,6 +134,10 @@ impl Core {
                 PortState::Taken(port) => {
                     kill(child);
                     return Err(format!("{PORT_TAKEN} {port} is being used by another program. Connect again to use new ports."));
+                }
+                PortState::Unverified => {
+                    kill(child);
+                    return Err("Cannot verify the local Xray listeners.".into());
                 }
                 PortState::Waiting => {}
             }
@@ -181,6 +184,7 @@ impl Core {
             stop(old);
         }
         for attempt in 1..=2 {
+            verify(exe)?;
             let mut cmd = Command::new(exe);
             cmd.args(["run", "-c", "stdin", "--disable-color", "-D"]).arg(work_dir);
             let mut child = self.launch("tun", cmd, &config.to_string())?;
@@ -214,6 +218,17 @@ impl Core {
 
     pub fn xray_alive(&mut self) -> bool {
         alive(&mut self.xray) == Some(true)
+    }
+
+    pub fn xray_ready(&mut self, ports: &[u16]) -> bool {
+        if !self.xray_alive() { return false; }
+        match &self.xray {
+            Some(Process::Local(child)) => matches!(port_state(child.id(), ports), PortState::Ready),
+            // The root helper checks ownership when starting cores under its separate account.
+            #[cfg(not(windows))]
+            Some(Process::Helped(_)) => true,
+            None => false,
+        }
     }
 
     /// None when no VPN adapter was started (proxy modes).
@@ -275,10 +290,12 @@ pub enum PortState {
     /// Another program listens on this port: it could pose as xray and receive the traffic
     /// (and the SOCKS password) meant for it.
     Taken(u16),
+    Unverified,
 }
 
 /// Whether process `pid` (xray) listens on all `ports`, and nobody else does.
 pub fn port_state(pid: u32, ports: &[u16]) -> PortState {
+    if ports.is_empty() { return PortState::Unverified; }
     match crate::platform::listener_pids(ports) {
         Some(owners) => {
             if let Some((port, _)) = ports.iter().zip(&owners).find(|(_, pids)| pids.iter().any(|&p| p != pid)) {
@@ -290,15 +307,7 @@ pub fn port_state(pid: u32, ports: &[u16]) -> PortState {
                 PortState::Waiting
             }
         }
-        // The table can't be read: the first port accepting connections will do.
-        None => {
-            let addr = ([127, 0, 0, 1], ports[0]).into();
-            if TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok() {
-                PortState::Ready
-            } else {
-                PortState::Waiting
-            }
-        }
+        None => PortState::Unverified,
     }
 }
 
@@ -361,25 +370,20 @@ fn kill(mut child: Child) {
     let _ = child.wait();
 }
 
-/// Returns the SHA-256 of a core binary. If `<name>.sha256` exists next to it,
-/// the hash must match, otherwise the core is refused.
-pub fn verify(exe: &Path) -> Result<String, String> {
-    let bytes = std::fs::read(exe).map_err(|e| format!("Cannot read {}: {e}", exe.display()))?;
-    let hash = hex::encode(Sha256::digest(&bytes));
-
-    let name = exe.file_name().unwrap_or_default().to_string_lossy();
-    let pin = exe.with_file_name(format!("{name}.sha256"));
-    if let Ok(expected) = std::fs::read_to_string(pin) {
-        let expected = expected.split_whitespace().next().unwrap_or_default().to_ascii_lowercase();
-        if expected != hash {
-            return Err(format!("{name} hash mismatch: expected {expected}, got {hash}"));
-        }
+/// Embedded Windows builds keep verified cores locked until exit.
+pub fn verify(exe: &Path) -> Result<(), String> {
+    if crate::cores::EMBEDDED {
+        return if crate::cores::trusted(exe) { Ok(()) } else { Err("Restart Phi2ray to verify its bundled core.".into()) };
     }
-    Ok(hash)
+    if cfg!(all(windows, not(debug_assertions))) {
+        return Err("Windows release builds require embedded, locked cores.".into());
+    }
+    crate::core_hashes::verify_launch(exe)
 }
 
 /// The version number printed by `<core> version`, e.g. "26.10.21".
 pub fn version(exe: &Path) -> Option<String> {
+    verify(exe).ok()?;
     let mut cmd = Command::new(exe);
     cmd.arg("version").stdin(Stdio::null()).stderr(Stdio::null());
     #[cfg(windows)]

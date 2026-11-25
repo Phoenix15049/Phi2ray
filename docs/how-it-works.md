@@ -61,8 +61,9 @@ It's a set of firewall rules, not a timer. While it's on, only these get out:
 - your local network, if you want printers and the router to stay reachable.
 
 It fails closed. If Phi2ray crashes, the rules stay and the app offers to reconnect or unblock
-when opened again. The rules are never saved, so restarting always clears them and you can't be
-locked out for good. The flip side is that they aren't active until Phi2ray starts.
+when opened again. Restarting clears ordinary rules. Absolute uses persistent Windows rules.
+While connected, Phi2ray checks its Windows filter identities or compares the live Linux table
+with the rules recorded by the helper.
 
 Replacing the rules never leaves a gap: Windows adds the new set before removing the old one, and
 Linux swaps them in a single nftables transaction. On Linux the rules also cover forwarded
@@ -73,27 +74,27 @@ traffic, so containers and virtual machines can't go around them.
 - Local proxy ports are random each time and only reachable from this computer. SOCKS always asks
   for a username and password, and VPN mode has no HTTP port at all. The proxy modes do have an HTTP
   port without a password, because system proxy settings can't hold one.
-- Before Xray counts as started, Phi2ray checks that its ports really belong to it, so another
-  program can't grab one first and pose as the proxy.
+- Before Xray counts as started, Phi2ray checks the owners of all expected listeners. Xray
+  recovery withdraws its dependants and rotates automatic endpoints and credentials.
 - In System proxy mode, automatic proxy detection (WPAD) and setup scripts are off while you're
   connected, so a fake one on public Wi-Fi can't send your browser around the proxy.
-- Your server's name is looked up over encrypted DNS before connecting, so your network's DNS
-  doesn't see it. Fake private answers for a filtered server (like `10.10.34.36`) are ignored. The
-  last good address is remembered for 30 days, so reconnecting works when DNS can't be reached.
+- Your server's name is looked up over encrypted DNS first. Ordinary mode may fall back to a
+  recent public DNS result or to system DNS. Absolute requires an encrypted lookup or an
+  explicit server IP. A cached DNS result does not authenticate a server.
 - Saved servers are encrypted for your account, which keeps them safe if the file is copied
   somewhere else. Programs running as you can still read them, as with any app. On Linux systems
   with no keyring the key sits in a file next to them, readable only by you, which protects less.
-- Subscriptions are capped at 8 MB and 2000 servers. A redirect from `https` to `http` is refused,
-  as is one to this computer or the local network. Plain `http://` subscriptions never update by
-  themselves.
+- Subscriptions are capped at 8 MB and 2000 servers. Direct downloads reject unsafe redirects
+  and check resolved hostnames for public addresses. Proxied subscriptions require the final
+  URL. Plain `http://` subscriptions never update by themselves.
 - Error messages never include a subscription link or a server's password, so logs are safe to
   share, and the window itself never receives your servers' passwords.
 
 ## Staying connected
 
 - Phi2ray only reports *connected* once the VPN adapter is really up.
-- When something breaks, only the broken piece restarts and the tunnel stays up, so your apps wait
-  instead of falling back to your real connection.
+- When something breaks, Phi2ray stops the old adapter and proxy before rebuilding them.
+  Keep the kill switch on to block direct traffic during recovery.
 - If the server stops answering, Xray is restarted after 15 seconds, then less and less often (up
   to every two minutes), since every restart drops all open connections.
 - While connected, subscription updates and the DNS test always go through your server, even when

@@ -139,7 +139,7 @@ impl Default for Settings {
             http_port: 10809,
             log_level: "warning".into(),
             log_lines: 1000,
-            test_url: "http://www.gstatic.com/generate_204".into(),
+            test_url: "https://www.gstatic.com/generate_204".into(),
             language: "en".into(),
             theme: "system".into(),
             always_on_top: false,
@@ -210,6 +210,9 @@ impl Settings {
             self.kill_switch = true;
             self.block_quic = true;
         }
+        if self.test_url == "http://www.gstatic.com/generate_204" || self.test_url == "http://cp.cloudflare.com/generate_204" {
+            self.test_url.replace_range(..4, "https");
+        }
         self.version = SETTINGS_VERSION;
     }
 }
@@ -225,7 +228,7 @@ pub struct Store {
     /// Last good IP of each server address. Reconnecting still works when DNS can't be
     /// reached, for example while the kill switch holds the internet blocked after a crash.
     pub resolved: std::collections::HashMap<String, std::net::IpAddr>,
-    /// When each address in `resolved` was last confirmed (Unix seconds).
+    /// When each address in `resolved` was last resolved (Unix seconds).
     pub resolved_at: std::collections::HashMap<String, u64>,
     /// The saved store exists but its key can't be reached, so nothing may overwrite it.
     #[serde(skip)]
@@ -361,6 +364,8 @@ mod vault;
 
 #[cfg(not(windows))]
 pub use vault::set_folder as set_key_folder;
+#[cfg(not(windows))]
+pub(crate) use vault::uses_file_key;
 
 #[cfg(test)]
 mod tests {

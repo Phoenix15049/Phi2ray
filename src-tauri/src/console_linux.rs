@@ -131,10 +131,13 @@ fn serve(hooks: &Hooks, mut client: UnixStream) {
 
 /// One line, with a time limit so a client that never sends can't hold a thread.
 fn read_request(client: &mut UnixStream) -> Option<Vec<u8>> {
-    client.set_read_timeout(Some(REQUEST_TIMEOUT)).ok()?;
+    let deadline = std::time::Instant::now() + REQUEST_TIMEOUT;
     let mut data = Vec::new();
     let mut buf = [0u8; 16 * 1024];
     loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() { return None; }
+        client.set_read_timeout(Some(remaining)).ok()?;
         let n = client.read(&mut buf).ok()?;
         if n == 0 {
             return None;
@@ -151,6 +154,7 @@ fn read_request(client: &mut UnixStream) -> Option<Vec<u8>> {
 }
 
 fn reply(client: &mut UnixStream, reply: &Reply) -> std::io::Result<()> {
+    client.set_write_timeout(Some(REQUEST_TIMEOUT))?;
     let mut line = serde_json::to_vec(reply).unwrap_or_default();
     line.push(b'\n');
     client.write_all(&line)

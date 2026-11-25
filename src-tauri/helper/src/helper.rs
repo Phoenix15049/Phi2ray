@@ -65,8 +65,12 @@ fn start() -> Result<(), String> {
     }
     let exe = fs::read_link("/proc/self/exe").map_err(|e| e.to_string())?;
     let cores = exe.parent().ok_or("no folder")?.to_path_buf();
-    for path in [cores.as_path(), &exe, &cores.join("xray"), &cores.join("sing-box")] {
+    for path in cores.ancestors().chain([exe.as_path(), cores.join("xray").as_path(), cores.join("sing-box").as_path()]) {
         check_trusted(path)?;
+    }
+    for name in ["libcronet.so", "geoip.dat", "geosite.dat"] {
+        let file = cores.join(name);
+        if fs::symlink_metadata(&file).is_ok() { check_trusted(&file)?; }
     }
     make_dir(Path::new(RUN_DIR), 0o755, None)?;
     let _lock = single_instance()?;
@@ -101,8 +105,8 @@ fn start() -> Result<(), String> {
 
 /// The cores run from this folder, so nobody but root may be able to change anything in it.
 fn check_trusted(path: &Path) -> Result<(), String> {
-    let meta = fs::metadata(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    if meta.uid() != 0 || meta.mode() & 0o022 != 0 {
+    let meta = fs::symlink_metadata(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    if meta.is_symlink() || meta.uid() != 0 || meta.mode() & 0o022 != 0 || !(meta.is_file() || meta.is_dir()) {
         return Err(format!("{} must belong to root and be writable only by it", path.display()));
     }
     Ok(())
@@ -241,6 +245,13 @@ impl Helper {
                     helper.reply(id, outcome);
                 });
             }
+            Command::VerifyKillSwitch => {
+                let outcome = match self.verify_kill_switch() {
+                    Ok(()) => Outcome::Done,
+                    Err(error) => Outcome::Failed { error },
+                };
+                self.reply(id, outcome);
+            }
         }
     }
 
@@ -261,6 +272,7 @@ impl Helper {
     /// Starts a core as the cores' account. Its config goes in through stdin, so no secret touches
     /// the disk. An empty `tag` discards its output.
     fn launch(self: &Arc<Self>, mut process: Process, config: &str, tag: &'static str, caps: &'static [u32]) -> Result<Child, String> {
+        crate::core_hashes::verify_launch(Path::new(process.get_program()))?;
         let account = self.account;
         process.current_dir("/").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
         // Runs in the new process, before the core does.
@@ -379,12 +391,39 @@ impl Helper {
         self.reply(id, outcome);
     }
 
-    fn kill_switch(&self, on: bool, allow_lan: bool) -> Result<(), String> {
-        let script = if on { nft_rules(self.account.uid, allow_lan) } else { NFT_REMOVE.to_string() };
-        let nft = ["/usr/sbin/nft", "/sbin/nft", "/usr/bin/nft"]
+    fn nft() -> Result<&'static str, String> {
+        ["/usr/sbin/nft", "/sbin/nft", "/usr/bin/nft"]
             .into_iter()
             .find(|p| Path::new(p).exists())
-            .ok_or("The kill switch needs nftables, which isn't installed.")?;
+            .ok_or_else(|| "The kill switch needs nftables, which isn't installed.".into())
+    }
+
+    fn live_kill_switch() -> Result<Vec<u8>, String> {
+        let result = Process::new(Self::nft()?)
+            .args(["-s", "-nn", "list", "table", "inet", "phi2ray"])
+            .env("LC_ALL", "C")
+            .stdin(Stdio::null()).output().map_err(|e| format!("Cannot check the kill switch: {e}"))?;
+        if !result.status.success() || result.stdout.is_empty() {
+            return Err("Cannot read the active kill-switch rules.".into());
+        }
+        Ok(result.stdout)
+    }
+
+    fn verify_kill_switch(&self) -> Result<(), String> {
+        let saved = fs::read(KILL_SWITCH_FLAG).map_err(|_| "Missing kill-switch recovery record.")?;
+        if saved != Self::live_kill_switch()? {
+            return Err("The active kill-switch rules have changed.".into());
+        }
+        Ok(())
+    }
+
+    fn kill_switch(&self, on: bool, allow_lan: bool) -> Result<(), String> {
+        let script = if on { nft_rules(self.account.uid, allow_lan) } else { NFT_REMOVE.to_string() };
+        let nft = Self::nft()?;
+        if on && !Path::new(KILL_SWITCH_FLAG).exists() {
+            // Keep a recovery record even if the rules apply but readback subsequently fails.
+            fs::write(KILL_SWITCH_FLAG, b"pending\n").map_err(|e| format!("Kill switch: {e}"))?;
+        }
         let mut process = Process::new(nft)
             .args(["-f", "-"])
             .stdin(Stdio::piped())
@@ -400,7 +439,8 @@ impl Helper {
             return Err(format!("Kill switch: nft failed: {}", String::from_utf8_lossy(&result.stderr).trim()));
         }
         if on {
-            fs::write(KILL_SWITCH_FLAG, b"on\n").map_err(|e| format!("Kill switch: {e}"))
+            fs::write(KILL_SWITCH_FLAG, Self::live_kill_switch()?).map_err(|e| format!("Kill switch: {e}"))?;
+            self.verify_kill_switch()
         } else {
             match fs::remove_file(KILL_SWITCH_FLAG) {
                 Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(format!("Kill switch: {e}")),
