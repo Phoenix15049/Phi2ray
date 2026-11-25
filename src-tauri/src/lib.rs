@@ -529,18 +529,27 @@ pub(crate) fn edit_settings(
         (store.settings.kill_switch != settings.kill_switch, store.settings.console != settings.console)
     };
     let absolute_changed = previous.absolute_mode != settings.absolute_mode;
+    if previous.absolute_mode && settings.absolute_mode
+        && previous.absolute_browser_location != settings.absolute_browser_location
+    {
+        return Err("Turn off Absolute before changing its browser location protection.".into());
+    }
     let recovery_pending = !previous.absolute_mode &&
         (absolute::marker(state).exists() || state.absolute.lock().unwrap().phase == "error");
     let release_absolute = !settings.absolute_mode && (absolute_changed || (retry_absolute && recovery_pending));
     if absolute_changed || release_absolute || (settings.absolute_mode && previous.absolute_timezone != settings.absolute_timezone) {
         if settings.absolute_mode {
-            absolute::arm(state)?;
-            if let Err(e) = connection::absolute_barrier(state, &settings, false) {
+            platform::elevate()?;
+            if let Err(e) = connection::absolute_barrier(state, &settings, false)
+                .map(|_| {
+                    connection::teardown(state);
+                    state.blocked.store(true, Ordering::SeqCst);
+                })
+                .and_then(|_| absolute::arm(state, &settings))
+            {
                 absolute::phase(state, "error", Some(e.clone()));
                 return Err(e);
             }
-            connection::teardown(state);
-            state.blocked.store(true, Ordering::SeqCst);
         } else {
             // Keep the barrier until all system state has been restored successfully.
             if let Err(e) = connection::absolute_barrier(state, &settings, false) {
@@ -970,7 +979,7 @@ pub fn run() {
             let settings = app.state::<AppState>().store.lock().unwrap().settings.clone();
             if settings.absolute_mode {
                 let state = app.state::<AppState>();
-                if let Err(e) = connection::absolute_barrier(&state, &settings, false).and_then(|_| absolute::arm(&state)) {
+                if let Err(e) = connection::absolute_barrier(&state, &settings, false).and_then(|_| absolute::arm(&state, &settings)) {
                     absolute::phase(&state, "error", Some(e.clone()));
                     connection::log(&state, format!("[absolute] Startup protection failed: {e}"));
                     // Do not start ordinary connections after a failed protected startup.

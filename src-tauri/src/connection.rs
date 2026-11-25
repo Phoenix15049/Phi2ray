@@ -221,8 +221,6 @@ fn connect_locked(app: &AppHandle, state: &AppState, id: &str) -> Result<Session
         crate::verify_cached(state, &state.paths.sing_box())?;
     }
     if settings.absolute_mode {
-        crate::absolute::arm(state)?;
-        crate::absolute::phase(state, "preparing", None);
         absolute_barrier(state, &settings, false)?;
         teardown(state);
         state.blocked.store(true, Ordering::SeqCst);
@@ -408,20 +406,28 @@ fn start_parts(state: &AppState, settings: &Settings, xray_cfg: &Value, tun_cfg:
                 AbsoluteStep::Barrier => absolute_barrier(state, settings, false)?,
                 AbsoluteStep::Stop => state.core.lock().unwrap().stop(),
                 AbsoluteStep::ProbeOnly => {
-                    crate::absolute::arm(state)?;
+                    crate::absolute::arm(state, settings)?;
                     crate::absolute::phase(state,"preparing",None);
                     state.core.lock().unwrap().start_xray(&state.paths.xray(),&state.paths.core,&gated_config(xray_cfg),local_ports)?;
                 }
-                AbsoluteStep::Timezone => crate::absolute::prepare(state,proxy,&settings.absolute_timezone)?,
+                AbsoluteStep::Timezone => {
+                    check_startup(settings, proxy)?;
+                    crate::absolute::prepare(state, proxy, settings)?;
+                }
                 AbsoluteStep::UserProxy => state.core.lock().unwrap().start_xray(&state.paths.xray(),&state.paths.core,xray_cfg,local_ports)?,
                 AbsoluteStep::Tunnel => state.core.lock().unwrap().start_tun(&state.paths.sing_box(),&state.paths.work,tun_cfg.ok_or("Absolute needs a VPN adapter config")?)?,
-                AbsoluteStep::Activate => { absolute_barrier(state,settings,true)?; crate::absolute::phase(state,"active",None); }
+                AbsoluteStep::Activate => {
+                    crate::absolute::verify_location(state, settings)?;
+                    absolute_barrier(state, settings, true)?;
+                    crate::absolute::phase(state, "active", None);
+                }
             }
             Ok(())
         });
     }
     let mut core = state.core.lock().unwrap();
     core.start_xray(&state.paths.xray(), &state.paths.core, xray_cfg, local_ports)?;
+    check_startup(settings, proxy)?;
     match (tun_cfg, settings.mode) {
         (Some(cfg), _) => core.start_tun(&state.paths.sing_box(), &state.paths.work, cfg)?,
         (None, Mode::System) => {
@@ -431,6 +437,15 @@ fn start_parts(state: &AppState, settings: &Settings, xray_cfg: &Value, tun_cfg:
         _ => {}
     }
     drop(core);
+    Ok(())
+}
+
+fn check_startup(settings: &Settings, proxy: &LocalProxy) -> Result<(), String> {
+    if let Some(seconds) = settings.connect_timeout {
+        tauri::async_runtime::block_on(probe::wait_for_server(
+            &settings.test_url, proxy, Duration::from_secs(seconds.into()),
+        ))?;
+    }
     Ok(())
 }
 
@@ -624,7 +639,7 @@ fn supervise(app: AppHandle, generation: u64) {
             let settings = state.store.lock().unwrap().settings.clone();
             let proxy = state.link.lock().unwrap().as_ref().map(|l| l.probe_proxy.clone());
             if let Some(proxy) = proxy {
-                let verification = crate::absolute::verify(&state, &proxy, &settings.absolute_timezone);
+                let verification = crate::absolute::verify(&state, &proxy, &settings);
                 let Ok(_guard) = state.switching.try_lock() else { continue };
                 if !current() { return; }
                 match verification {

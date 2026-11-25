@@ -33,7 +33,10 @@ fn text(v: &Value, key: &str) -> String {
     v.get(key).and_then(Value::as_str).unwrap_or_default().to_string()
 }
 
-fn profile(root: &Value) -> Result<Profile, String> {
+pub(super) fn profile(root: &Value) -> Result<Profile, String> {
+    if root["v"].is_u64() && root["d"].is_string() && root.as_object().is_some_and(|o| o.len() == 2) {
+        return Err("This looks like a SocksHTTP container. Use a SOCKS5 link or standard Xray JSON.".into());
+    }
     let outbound = if let Some(outbounds) = root.get("outbounds") {
         let candidates: Vec<_> = outbounds.as_array().ok_or("outbounds must be a list")?.iter()
             .filter(|o| !matches!(o["protocol"].as_str(), Some("freedom" | "blackhole" | "dns"))).collect();

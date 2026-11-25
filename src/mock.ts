@@ -81,7 +81,21 @@ let session: Session | null =
 const logs: string[] = [];
 
 const blocked = params.get("demo") === "blocked";
-const mockStatus = () => ({ session, absoluteSupported: true, absolute: {phase: settings.absoluteMode ? (session ? "active" : "armed") : "off", timezone: settings.absoluteMode && session ? (settings.absoluteTimezone || "America/Toronto") : null, exitIp: session?.exit?.ip ?? null, error: null}, firewall: settings.absoluteMode || !!session?.killSwitch || blocked, blocked: (settings.absoluteMode || blocked) && !session, xrayFound: true, tunFound: true, elevated: true, coreError: null });
+const mockStatus = () => ({
+  session,
+  absoluteSupported: true,
+  absolute: {
+    phase: settings.absoluteMode ? (session ? "active" : "armed") : "off",
+    timezone: settings.absoluteMode && session ? (settings.absoluteTimezone || "America/Toronto") : null,
+    exitIp: session?.exit?.ip ?? null,
+    error: null,
+    locationBlocked: settings.absoluteMode,
+    browserLocationPolicy: settings.absoluteMode && settings.absoluteBrowserLocation,
+  },
+  firewall: settings.absoluteMode || !!session?.killSwitch || blocked,
+  blocked: (settings.absoluteMode || blocked) && !session,
+  xrayFound: true, tunFound: true, elevated: true, coreError: null,
+});
 
 const handlers: Record<string, (args: Record<string, any>) => unknown> = {
   get_state: () => ({ groups, profiles, settings }),

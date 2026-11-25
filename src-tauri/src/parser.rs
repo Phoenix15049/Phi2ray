@@ -179,14 +179,23 @@ pub fn parse_many(text: &str) -> Parsed {
     let body = if text.starts_with(['{', '[']) || text.contains("://") || wireguard::contains_interface(text) {
         text.to_string()
     } else {
-        b64_decode(text)
-            .ok()
-            .and_then(|b| String::from_utf8(b).ok())
-            .unwrap_or_else(|| text.to_string())
+        match b64_decode(text) {
+            Ok(bytes) => {
+                if let Some(error) = protected_npvs_error(&bytes) {
+                    return Parsed { profiles: vec![], errors: vec![error], skipped: 1 };
+                }
+                String::from_utf8(bytes).unwrap_or_else(|_| text.to_string())
+            }
+            Err(_) => text.to_string(),
+        }
     };
 
     let mut out = Parsed { profiles: Vec::new(), errors: Vec::new(), skipped: 0 };
     let mut remaining = body.trim_start_matches('\u{feff}');
+    if is_openvpn(remaining) {
+        fail(&mut out, "OpenVPN profiles (.ovpn) need an OpenVPN client.".into());
+        return out;
+    }
     let mut index = 0;
     let mut entries = 0;
     while !remaining.is_empty() {
@@ -247,6 +256,45 @@ pub fn parse_many(text: &str) -> Parsed {
     out
 }
 
+fn is_openvpn(text: &str) -> bool {
+    let mut mode = false;
+    let mut endpoint = false;
+    for line in text.lines().take(MAX_LINES) {
+        let mut words = line.split_ascii_whitespace();
+        match words.next() {
+            Some("client") => mode = true,
+            Some("dev") if words.next().is_some_and(|dev| matches!(dev, "tun" | "tap")) => mode = true,
+            Some("remote") if words.next().is_some() => endpoint = true,
+            _ => {}
+        }
+        if mode && endpoint { return true; }
+    }
+    false
+}
+
+pub(crate) fn protected_npvs_error(bytes: &[u8]) -> Option<String> {
+    let version = *bytes.strip_prefix(b"NPVS")?.first()?;
+    if version >= 32 { return None; }
+
+    // Only the compact v5 header identifies the protection method.
+    let reason = if version == 5 && bytes.len() >= 62 && bytes[9] == 1 {
+        let header_len = u32::from_be_bytes([bytes[5], bytes[6], bytes[7], bytes[8]]) as usize;
+        if (53..=bytes.len() - 9).contains(&header_len) {
+            match bytes[59] {
+                0 => "The Npv Tunnel file is encrypted for specific recipients.",
+                1 => "The Npv Tunnel file is protected by its creator's passphrase.",
+                2 => "The file is encrypted for Npv Tunnel.",
+                _ => "This is a protected Npv Tunnel file.",
+            }
+        } else {
+            "This is a protected Npv Tunnel file."
+        }
+    } else {
+        "This is a protected Npv Tunnel file."
+    };
+    Some(format!("{reason} Ask the provider for a standard subscription link or Xray JSON."))
+}
+
 fn fail(out: &mut Parsed, message: String) {
     out.skipped += 1;
     if out.errors.len() < MAX_ERRORS { out.errors.push(message); }
@@ -274,9 +322,32 @@ pub fn parse_link(link: &str) -> Result<Profile, String> {
         "trojan" => parse_url_style(link, Protocol::Trojan),
         "vmess" => parse_vmess(link),
         "ss" => parse_ss(link),
-        "npv" | "napsternetv" => Err("Use the provider's standard share link, Xray JSON or WireGuard file".into()),
+        "socks" | "socks5" => parse_socks5(link),
+        "npv" | "npvs" | "napsternetv" => Err("Use the provider's standard share link, Xray JSON or WireGuard file".into()),
+        "darktunnel" => Err("DarkTunnel exports need a standard share link or Xray JSON.".into()),
         other => Err(format!("unsupported protocol: {}", other.chars().take(12).collect::<String>())),
     }
+}
+
+fn parse_socks5(link: &str) -> Result<Profile, String> {
+    let url = Url::parse(link).map_err(|_| "invalid SOCKS5 link")?;
+    if !matches!(url.path(), "" | "/") || url.query().is_some() {
+        return Err("SOCKS5 links take only a host, port, optional credentials and name".into());
+    }
+    let host = url.host_str().ok_or("missing SOCKS5 host")?;
+    let address = url::Host::parse(host).map_err(|_| "invalid SOCKS5 host")?.to_string();
+    let (user, pass) = (url.username(), url.password().unwrap_or_default());
+    let credential = |value: &str| percent_decode_str(value).decode_utf8().map(|s| s.into_owned())
+        .map_err(|_| "invalid SOCKS5 credentials");
+    let (user, pass) = (credential(user)?, credential(pass)?);
+    if user.is_empty() != pass.is_empty() || user.len() > 255 || pass.len() > 255 {
+        return Err("SOCKS5 requires both username and password (up to 255 bytes each)".into());
+    }
+    custom::profile(&serde_json::json!({
+        "remarks": url.fragment().map(decode),
+        "protocol": "socks",
+        "settings": {"address": address, "port": url.port().unwrap_or(1080), "user": user, "pass": pass}
+    }))
 }
 
 /// vless://uuid@host:port?type=..&security=..#name and trojan://password@host:port?...#name
@@ -498,6 +569,56 @@ fn new_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn protected_npvs_is_identified_before_text_parsing() {
+        let mut file = vec![0; 256];
+        file[..5].copy_from_slice(b"NPVS\x05");
+        file[5..9].copy_from_slice(&53_u32.to_be_bytes());
+        file[9] = 1;
+
+        for (method, expected) in [
+            (0, "specific recipients"),
+            (1, "creator's passphrase"),
+            (2, "encrypted for Npv Tunnel"),
+            (3, "protected Npv Tunnel file"),
+        ] {
+            file[59] = method;
+            assert!(protected_npvs_error(&file).unwrap().contains(expected));
+            let base64 = base64::engine::general_purpose::STANDARD.encode(&file);
+            let parsed = parse_many(&base64);
+            assert!(parsed.profiles.is_empty());
+            assert_eq!(parsed.skipped, 1);
+            assert!(parsed.errors[0].contains(expected));
+        }
+
+        assert!(protected_npvs_error(b"NPVS ordinary text").is_none());
+        assert!(protected_npvs_error(&file[..10]).unwrap().contains("protected Npv Tunnel file"));
+        file[5..9].copy_from_slice(&u32::MAX.to_be_bytes());
+        file[59] = 1;
+        assert!(protected_npvs_error(&file).unwrap().contains("protected Npv Tunnel file"));
+    }
+
+    #[test]
+    fn recognises_native_formats_and_imports_standard_socks_links() {
+        let parsed = parse_many("client\ndev tun\nremote vpn.example.test 1194\n<auth-user-pass>\nsecret\n</auth-user-pass>");
+        assert!(parsed.profiles.is_empty());
+        assert!(parsed.errors[0].contains("OpenVPN"));
+        assert!(!parsed.errors[0].contains("secret"));
+        assert!(parse_many(r#"{"v":5,"d":"opaque"}"#).errors[0].contains("SocksHTTP"));
+        assert!(parse_many("darktunnel://opaque").errors[0].contains("DarkTunnel"));
+
+        let profile = parse_link("socks5://alice:p%40ss@[2001:db8::2]:8080#Example").unwrap();
+        assert_eq!((profile.name.as_str(), profile.address.as_str(), profile.port), ("Example", "2001:db8::2", 8080));
+        assert_eq!(profile.insecure(), Some("unencrypted"));
+        let exported = crate::config::for_export(&profile);
+        assert_eq!(exported["outbounds"][0]["settings"]["user"], "alice");
+        assert_eq!(exported["outbounds"][0]["settings"]["pass"], "p@ss");
+        assert_eq!(parse_many(&exported.to_string()).profiles.len(), 1);
+        assert_eq!(parse_link("socks5://example.test").unwrap().port, 1080);
+        assert!(parse_link("socks5://alice@example.test").is_err());
+        assert!(parse_link("socks5://example.test?transport=unsupported").is_err());
+    }
 
     #[test]
     fn limits() {

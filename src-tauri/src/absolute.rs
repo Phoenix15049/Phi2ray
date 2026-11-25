@@ -53,6 +53,8 @@ pub struct Status {
     pub phase: String,
     pub timezone: Option<String>,
     pub exit_ip: Option<String>,
+    pub location_blocked: bool,
+    pub browser_location_policy: bool,
     pub error: Option<String>,
 }
 
@@ -63,6 +65,8 @@ pub fn phase(state: &AppState, phase: &str, error: Option<String>) {
     if phase == "off" {
         status.timezone = None;
         status.exit_ip = None;
+        status.location_blocked = false;
+        status.browser_location_policy = false;
     }
 }
 
@@ -76,17 +80,42 @@ struct Backup {
     auto_start: u32,
     auto_running: bool,
     location: Option<String>,
+    /// Absent in recovery records written before policy enforcement.
+    #[serde(default)]
+    policies: Option<LocationPolicies>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct LocationPolicies {
+    windows: Option<u32>,
+    browsers: Option<BrowserLocationPolicies>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct BrowserLocationPolicies {
+    chrome: Option<u32>,
+    edge: Option<u32>,
 }
 
 impl Backup {
     fn same_settings(&self, other: &Self) -> bool {
-        self.id == other.id && self.dst_disabled == other.dst_disabled && self.auto_start == other.auto_start && self.location == other.location
+        self.id == other.id && self.dst_disabled == other.dst_disabled && self.auto_start == other.auto_start
+            && self.location == other.location
+            && other.policies.as_ref().is_none_or(|saved| self.policies.as_ref().is_some_and(|now|
+                now.windows == saved.windows && saved.browsers.as_ref().is_none_or(|b| now.browsers.as_ref() == Some(b))))
+    }
+
+    fn location_protected(&self, browsers: bool) -> bool {
+        self.location.as_deref() == Some("Deny")
+            && self.auto_start == 4 && !self.auto_running
+            && self.policies.as_ref().is_some_and(|p| p.windows == Some(1)
+                && (!browsers || p.browsers.as_ref().is_some_and(|b| b.chrome == Some(2) && b.edge == Some(2))))
     }
 }
 
 trait System {
     fn read(&self) -> Result<Backup, String>;
-    fn apply(&self, windows_id: &str) -> Result<(), String>;
+    fn apply_timezone(&self, windows_id: &str) -> Result<(), String>;
     fn restore(&self, backup: &Backup) -> Result<(), String>;
     fn create_backup(&self, path: &Path) -> Result<std::fs::File, String> {
         std::fs::OpenOptions::new().write(true).create_new(true).open(path).map_err(|e| e.to_string())
@@ -97,7 +126,7 @@ pub fn marker(state: &AppState) -> std::path::PathBuf {
     state.paths.data.join("absolute-backup.json")
 }
 
-fn save_backup(path: &Path, system: &impl System, lease: &str) -> Result<(), String> {
+fn save_backup(path: &Path, system: &impl System, lease: &str, browsers: bool) -> Result<(), String> {
     use std::io::Write;
     if path.exists() {
         // Never replace the original timezone on reconnect or a server switch.
@@ -106,6 +135,9 @@ fn save_backup(path: &Path, system: &impl System, lease: &str) -> Result<(), Str
     }
     let mut backup = system.read()?;
     backup.lease = lease.into();
+    if !browsers {
+        if let Some(policies) = &mut backup.policies { policies.browsers = None; }
+    }
     let data = serde_json::to_vec(&backup).map_err(|e| e.to_string())?;
     let temp = path.with_file_name(format!("absolute-{lease}.tmp"));
     let result = (|| {
@@ -147,7 +179,7 @@ fn restore_with(path: &Path, system: &impl System) -> Result<(), String> {
     std::fs::remove_file(path).map_err(|e| format!("Timezone restored, but recovery record could not be removed: {e}"))
 }
 
-pub fn arm(state: &AppState) -> Result<(), String> {
+fn ensure_backup(state: &AppState, browsers: bool) -> Result<(), String> {
     if !cfg!(windows) {
         return Err("Absolute mode needs Windows.".into());
     }
@@ -163,7 +195,7 @@ pub fn arm(state: &AppState) -> Result<(), String> {
         status.guarded = true;
     }
     // Snapshot only after taking the machine-wide lease, never another session's timezone.
-    if let Err(e) = save_backup(&path, &Native, &lease) {
+    if let Err(e) = save_backup(&path, &Native, &lease, browsers) {
         if let Some(mut child) = state.absolute_guard.lock().unwrap().take() {
             let _ = child.kill();
             let _ = child.wait();
@@ -171,7 +203,28 @@ pub fn arm(state: &AppState) -> Result<(), String> {
         state.absolute.lock().unwrap().guarded = false;
         return Err(e);
     }
+    Ok(())
+}
+
+pub fn arm(state: &AppState, settings: &Settings) -> Result<(), String> {
+    ensure_backup(state, settings.absolute_browser_location)?;
+    let policies = read_backup(&marker(state))?.policies.ok_or(
+        "Restore the previous Absolute settings before enabling location policies.",
+    )?;
+    let browsers = policies.browsers.is_some();
+    if browsers != settings.absolute_browser_location {
+        return Err("Turn off Absolute before changing its browser location protection.".into());
+    }
+    {
+        let mut status = state.absolute.lock().unwrap();
+        status.location_blocked = false;
+        status.browser_location_policy = false;
+    }
+    Native.block_location(browsers)?;
     phase(state, "armed", None);
+    let mut status = state.absolute.lock().unwrap();
+    status.location_blocked = true;
+    status.browser_location_policy = browsers;
     Ok(())
 }
 
@@ -196,7 +249,7 @@ pub fn recover(path: &Path) -> Result<(), String> {
 pub fn restore_owned(state: &AppState) -> Result<(), String> {
     let path = marker(state);
     if path.exists() {
-        arm(state)?;
+        ensure_backup(state, false)?;
     }
     restore(&path)?;
     state.absolute.lock().unwrap().guarded = false;
@@ -267,14 +320,14 @@ async fn lookup(proxy: &LocalProxy, manual: &str) -> Result<Destination, String>
     destination(&value, manual)
 }
 
-pub fn prepare(state: &AppState, proxy: &LocalProxy, manual: &str) -> Result<(), String> {
+pub fn prepare(state: &AppState, proxy: &LocalProxy, settings: &Settings) -> Result<(), String> {
     phase(state, "preparing", None);
     let result: Result<(), String> = (|| {
         if !marker(state).exists() {
             return Err("Absolute recovery record is missing. Disable and enable Absolute again.".into());
         }
-        let dest = tauri::async_runtime::block_on(lookup(proxy, manual))?;
-        Native.apply(&windows_zone(&dest.timezone)?)?;
+        let dest = tauri::async_runtime::block_on(lookup(proxy, &settings.absolute_timezone))?;
+        Native.apply_timezone(&windows_zone(&dest.timezone)?)?;
         let mut status = state.absolute.lock().unwrap();
         status.timezone = Some(dest.timezone);
         status.exit_ip = Some(dest.ip);
@@ -286,21 +339,29 @@ pub fn prepare(state: &AppState, proxy: &LocalProxy, manual: &str) -> Result<(),
     result
 }
 
+pub fn verify_location(state: &AppState, settings: &Settings) -> Result<(), String> {
+    let verified = Native.read().is_ok_and(|current| current.location_protected(settings.absolute_browser_location));
+    let mut status = state.absolute.lock().unwrap();
+    status.location_blocked = verified;
+    status.browser_location_policy = verified && settings.absolute_browser_location;
+    if verified { Ok(()) } else { Err("Windows location protection could not be verified.".into()) }
+}
+
 /// A failed periodic verification must close the data path before recovery is attempted.
-pub fn verify(state: &AppState, proxy: &LocalProxy, manual: &str) -> Result<String, String> {
+pub fn verify(state: &AppState, proxy: &LocalProxy, settings: &Settings) -> Result<String, String> {
     if !state.absolute_guard.lock().unwrap().as_mut().is_some_and(|child| matches!(child.try_wait(), Ok(None))) {
         return Err("Timezone recovery guard stopped; rebuilding protection.".into());
     }
-    let dest = tauri::async_runtime::block_on(lookup(proxy, manual))?;
+    let current = Native.read()?;
+    if !current.location_protected(settings.absolute_browser_location) {
+        return Err("Location protection changed; revalidating Absolute.".into());
+    }
+    let dest = tauri::async_runtime::block_on(lookup(proxy, &settings.absolute_timezone))?;
     let status = state.absolute.lock().unwrap().clone();
     if status.timezone.as_deref() != Some(&dest.timezone) {
         return Err("VPN exit timezone changed; revalidating protection.".into());
     }
-    let current = Native.read()?;
     if current.id != windows_zone(&dest.timezone)?
-        || current.auto_start != 4
-        || current.auto_running
-        || current.location.as_deref() != Some("Deny")
         || current.dst_disabled
     {
         return Err("Windows protection settings changed; revalidating Absolute.".into());
@@ -319,21 +380,57 @@ mod native {
     use std::process::{Child, Command, Stdio};
     use std::time::{Duration, Instant};
     // Fixed scripts; data is read as JSON on stdin and is never interpolated into code.
+    const REGISTRY: &str = r#"
+$locationConsent='SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\location'
+$locationPolicy='SOFTWARE\Policies\Microsoft\Windows\LocationAndSensors'
+$chromePolicy='SOFTWARE\Policies\Google\Chrome'
+$edgePolicy='SOFTWARE\Policies\Microsoft\Edge'
+function Read-RegistryValue($path,$name,[Microsoft.Win32.RegistryValueKind]$kind){
+    $key=[Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($path,$false)
+    if($null -eq $key){return $null}
+    try{
+        $value=$key.GetValue($name,$null,[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        if($null -eq $value){return $null}
+        if($key.GetValueKind($name) -ne $kind){throw "Unexpected registry value type for $path\$name. Expected $kind."}
+        return $value
+    }finally{$key.Dispose()}
+}
+function Write-RegistryValue($path,$name,$value,[Microsoft.Win32.RegistryValueKind]$kind){
+    if($null -eq $value){
+        $key=[Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($path,$true)
+        if($null -eq $key){return}
+        try{$key.DeleteValue($name,$false)}finally{$key.Dispose()}
+    }else{
+        $key=[Microsoft.Win32.Registry]::LocalMachine.CreateSubKey($path)
+        try{$key.SetValue($name,$value,$kind)}finally{$key.Dispose()}
+    }
+}
+"#;
     const READ: &str = r#"
 $z=Get-TimeZone
 $r=Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\TimeZoneInformation'
 $a=Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\tzautoupdate'
-$l=Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\location' -ErrorAction SilentlyContinue
-@{id=$z.Id;dstDisabled=[bool]$r.DynamicDaylightTimeDisabled;autoStart=[uint32]$a.Start;autoRunning=((Get-Service tzautoupdate).Status -eq 'Running');location=$l.Value}|ConvertTo-Json -Compress
+$l=Read-RegistryValue $locationConsent Value String
+$w=Read-RegistryValue $locationPolicy DisableLocation DWord
+$c=Read-RegistryValue $chromePolicy DefaultGeolocationSetting DWord
+$e=Read-RegistryValue $edgePolicy DefaultGeolocationSetting DWord
+@{id=$z.Id;dstDisabled=[bool]$r.DynamicDaylightTimeDisabled;autoStart=[uint32]$a.Start;autoRunning=((Get-Service tzautoupdate).Status -eq 'Running');location=$l;
+  policies=@{windows=$w;browsers=@{chrome=$c;edge=$e}}}|ConvertTo-Json -Compress -Depth 4
 "#;
-    const APPLY: &str = r#"
+    const BLOCK_LOCATION: &str = r#"
 $d=[Console]::In.ReadToEnd()|ConvertFrom-Json
-[void][TimeZoneInfo]::FindSystemTimeZoneById($d.id)
+Write-RegistryValue $locationPolicy DisableLocation 1 DWord
 Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\tzautoupdate' Start 4
 Stop-Service tzautoupdate -ErrorAction Stop
-$p='HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\location'
-if(!(Test-Path $p)){[void](New-Item $p -Force)}
-Set-ItemProperty $p Value 'Deny'
+Write-RegistryValue $locationConsent Value 'Deny' String
+if($d.browsers){
+    Write-RegistryValue $chromePolicy DefaultGeolocationSetting 2 DWord
+    Write-RegistryValue $edgePolicy DefaultGeolocationSetting 2 DWord
+}
+"#;
+    const APPLY_TIMEZONE: &str = r#"
+$d=[Console]::In.ReadToEnd()|ConvertFrom-Json
+[void][TimeZoneInfo]::FindSystemTimeZoneById($d.id)
 & ([IO.Path]::Combine([Environment]::GetFolderPath('System'),'tzutil.exe')) /s $d.id
 if($LASTEXITCODE -ne 0){throw 'Timezone update failed'}
 if((Get-TimeZone).Id -ne $d.id){throw 'Timezone verification failed'}
@@ -348,8 +445,14 @@ if($d.dstDisabled){$id+='_dstoff'}
 & ([IO.Path]::Combine([Environment]::GetFolderPath('System'),'tzutil.exe')) /s $id
 if($LASTEXITCODE -ne 0){throw 'Timezone restore failed'}
 if((Get-TimeZone).Id -ne $d.id){throw 'Timezone restore verification failed'}
-$p='HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\location'
-if($null -eq $d.location){Remove-ItemProperty $p Value -ErrorAction SilentlyContinue}else{Set-ItemProperty $p Value $d.location}
+Write-RegistryValue $locationConsent Value $d.location String
+if($null -ne $d.policies){
+    Write-RegistryValue $locationPolicy DisableLocation $d.policies.windows DWord
+    if($null -ne $d.policies.browsers){
+        Write-RegistryValue $chromePolicy DefaultGeolocationSetting $d.policies.browsers.chrome DWord
+        Write-RegistryValue $edgePolicy DefaultGeolocationSetting $d.policies.browsers.edge DWord
+    }
+}
 if($d.autoRunning){
     Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\tzautoupdate' Start 3
     Start-Service tzautoupdate -ErrorAction Stop
@@ -359,7 +462,7 @@ Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\tzautoupdate' Start $d
 
     fn powershell(script: &str, input: &str) -> Result<String, String> {
         use base64::Engine;
-        let script = format!("$ErrorActionPreference='Stop';[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);try{{{script}}}catch{{[Console]::Error.WriteLine($_.Exception.Message);exit 1}}");
+        let script = format!("$ErrorActionPreference='Stop';[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);try{{{REGISTRY}{script}}}catch{{[Console]::Error.WriteLine($_.Exception.Message);exit 1}}");
         let encoded = base64::engine::general_purpose::STANDARD
             .encode(script.encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<_>>());
         use std::os::windows::ffi::OsStringExt;
@@ -407,6 +510,18 @@ Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\tzautoupdate' Start $d
             ));
         }
         Ok(String::from_utf8_lossy(&output.stdout).trim_start_matches('\u{feff}').trim().into())
+    }
+
+    impl Native {
+        pub(super) fn block_location(&self, browsers: bool) -> Result<(), String> {
+            if !self.read()?.location_protected(browsers) {
+                powershell(BLOCK_LOCATION, &serde_json::json!({"browsers": browsers}).to_string())?;
+                if !self.read()?.location_protected(browsers) {
+                    return Err("Windows location protection could not be verified.".into());
+                }
+            }
+            Ok(())
+        }
     }
 
     impl System for Native {
@@ -464,17 +579,16 @@ Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\tzautoupdate' Start $d
             Ok(unsafe { std::fs::File::from_raw_handle(handle) })
         }
         fn read(&self) -> Result<Backup, String> {
-            serde_json::from_str(&powershell(READ, "")?)
-                .map_err(|_| "Could not read Windows protection settings".into())
+            let snapshot = powershell(READ, "").map_err(|e| format!("Could not read Windows protection settings: {e}"))?;
+            serde_json::from_str(&snapshot).map_err(|e| format!(
+                "Invalid Windows protection snapshot at line {}, column {}.", e.line(), e.column(),
+            ))
         }
-        fn apply(&self, id: &str) -> Result<(), String> {
-            powershell(APPLY, &serde_json::json!({"id": id}).to_string())?;
+        fn apply_timezone(&self, id: &str) -> Result<(), String> {
+            powershell(APPLY_TIMEZONE, &serde_json::json!({"id": id}).to_string())?;
             let now = self.read()?;
             if now.id != id
                 || now.dst_disabled
-                || now.auto_start != 4
-                || now.auto_running
-                || now.location.as_deref() != Some("Deny")
             {
                 return Err("Windows protection verification failed.".into());
             }
@@ -622,11 +736,16 @@ Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\tzautoupdate' Start $d
 #[cfg(not(windows))]
 mod native {
     use super::*;
+    impl Native {
+        pub(super) fn block_location(&self, _: bool) -> Result<(), String> {
+            Err("Windows only".into())
+        }
+    }
     impl System for Native {
         fn read(&self) -> Result<Backup, String> {
             Err("Windows only".into())
         }
-        fn apply(&self, _: &str) -> Result<(), String> {
+        fn apply_timezone(&self, _: &str) -> Result<(), String> {
             Err("Windows only".into())
         }
         fn restore(&self, _: &Backup) -> Result<(), String> {
@@ -675,9 +794,13 @@ mod tests {
                 auto_start: 3,
                 auto_running: true,
                 location: Some("Allow".into()),
+                policies: Some(LocationPolicies {
+                    windows: None,
+                    browsers: Some(BrowserLocationPolicies { chrome: Some(3), edge: None }),
+                }),
             })
         }
-        fn apply(&self, _: &str) -> Result<(), String> {
+        fn apply_timezone(&self, _: &str) -> Result<(), String> {
             panic!("not used")
         }
         fn restore(&self, b: &Backup) -> Result<(), String> {
@@ -696,9 +819,10 @@ mod tests {
         std::fs::create_dir(&dir).unwrap();
         let path = dir.join("backup.json");
         let fake = Fake { fail: Cell::new(true), reads: Cell::new(0), restores: Cell::new(0) };
-        save_backup(&path, &fake, "1234567890abcdef").unwrap();
-        save_backup(&path, &fake, "fedcba0987654321").unwrap();
+        save_backup(&path, &fake, "1234567890abcdef", false).unwrap();
+        save_backup(&path, &fake, "fedcba0987654321", true).unwrap();
         assert_eq!(fake.reads.get(), 1);
+        assert!(read_backup(&path).unwrap().policies.unwrap().browsers.is_none());
         assert!(restore_with(&path, &fake).is_err());
         assert!(path.exists());
         fake.fail.set(false);
@@ -723,6 +847,40 @@ mod tests {
         current = original.clone();
         current.dst_disabled = !current.dst_disabled;
         assert!(!current.same_settings(&original));
+    }
+
+    #[test]
+    fn location_snapshot_preserves_missing_and_existing_registry_values() {
+        let json = r#"{
+            "id":"UTC","dstDisabled":false,"autoStart":3,"autoRunning":false,"location":null,
+            "policies":{"windows":null,"browsers":{"chrome":2,"edge":null}}
+        }"#;
+        let original: Backup = serde_json::from_str(json).unwrap();
+        assert_eq!(original.location, None);
+        let policies = original.policies.as_ref().unwrap();
+        assert_eq!(policies.windows, None);
+        assert_eq!(policies.browsers, Some(BrowserLocationPolicies { chrome: Some(2), edge: None }));
+        let restored: Backup = serde_json::from_str(&serde_json::to_string(&original).unwrap()).unwrap();
+        assert!(restored.same_settings(&original));
+        assert!(serde_json::from_str::<Backup>(&json.replace("\"windows\":null", "\"windows\":{}")).is_err());
+    }
+
+    #[test]
+    fn location_protection_requires_all_requested_policies() {
+        let fake = Fake { fail: Cell::new(false), reads: Cell::new(0), restores: Cell::new(0) };
+        let mut current = fake.read().unwrap();
+        let mut legacy = current.clone();
+        legacy.policies = None;
+        current.policies.as_mut().unwrap().windows = Some(1);
+        assert!(current.same_settings(&legacy), "old backups must ignore new policies");
+        assert!(!current.location_protected(false));
+        current.location = Some("Deny".into());
+        current.auto_start = 4;
+        current.auto_running = false;
+        assert!(current.location_protected(false));
+        assert!(!current.location_protected(true));
+        current.policies.as_mut().unwrap().browsers = Some(BrowserLocationPolicies { chrome: Some(2), edge: Some(2) });
+        assert!(current.location_protected(true));
     }
     #[test]
     fn overlay_preserves_user_settings_and_disables_direct_paths() {

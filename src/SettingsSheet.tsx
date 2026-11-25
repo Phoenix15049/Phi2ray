@@ -186,6 +186,16 @@ export function SettingsSheet(p: Props) {
           <Row icon={Icon.play()} title={t("connectOnLaunch")} hint={t("connectOnLaunchHint")}>
             <Switch checked={s.autoConnect} onChange={(v) => p.onChange({ autoConnect: v })} label={t("connectOnLaunch")} />
           </Row>
+          <Row icon={Icon.bolt()} title={t("connectTimeout")} hint={t("connectTimeoutHint")}>
+            <select className="select" aria-label={t("connectTimeout")} value={s.connectTimeout ?? ""}
+              onChange={(e) => p.onChange({ connectTimeout: e.target.value ? Number(e.target.value) : null })}>
+              <option value="">{t("connectTimeoutAuto")}</option>
+              {[...new Set([5, 10, 15, 20, 30, 45, 60, 90, 120, ...(s.connectTimeout ? [s.connectTimeout] : [])])]
+                .sort((a, b) => a - b).map((seconds) => (
+                <option key={seconds} value={seconds}>{t("connectTimeoutSeconds", { n: seconds })}</option>
+              ))}
+            </select>
+          </Row>
         </Group>
       </Section>
 
@@ -209,6 +219,13 @@ export function SettingsSheet(p: Props) {
             {p.status.absolute.timezone && <div className="absolute-current">
               <span>{t("absoluteAppliedZone")}</span><bdi>{p.status.absolute.timezone}</bdi>
             </div>}
+            {p.status.absolute.locationBlocked && <div className="absolute-current">
+              <span>{t("absoluteWindowsLocation")}</span><bdi>{t("absoluteLocationBlocked")}</bdi>
+            </div>}
+            <Row icon={Icon.globe()} title={t("absoluteBrowserLocation")} hint={t(p.status.absolute.browserLocationPolicy ? "absoluteBrowserPolicySet" : "absoluteBrowserLocationHint")}>
+              <Switch checked={s.absoluteBrowserLocation} label={t("absoluteBrowserLocation")}
+                onChange={(v) => p.onChange({ absoluteBrowserLocation: v })} disabled={p.busy || s.absoluteMode || !!p.status.absolute.error} />
+            </Row>
             <label className="absolute-zone">
               <span>{t("absoluteZone")}</span>
               <input className="input ltr-input" value={absoluteZone} placeholder="Auto / America/Toronto" disabled={p.busy}

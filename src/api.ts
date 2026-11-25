@@ -56,8 +56,10 @@ export type Settings = {
   mode: Mode;
   selected: string | null;
   autoConnect: boolean;
+  connectTimeout: number | null;
   killSwitch: boolean;
   absoluteMode: boolean;
+  absoluteBrowserLocation: boolean;
   absoluteTimezone: string;
   autoReconnect: boolean;
   bypassLan: boolean;
@@ -104,7 +106,14 @@ export type Session = {
 };
 
 export type Status = {
-  absolute: { phase: string; timezone: string | null; exitIp: string | null; error: string | null };
+  absolute: {
+    phase: string;
+    timezone: string | null;
+    exitIp: string | null;
+    error: string | null;
+    locationBlocked: boolean;
+    browserLocationPolicy: boolean;
+  };
   absoluteSupported: boolean;
   session: Session | null;
   firewall: boolean;

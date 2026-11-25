@@ -47,6 +47,8 @@ const PHASE_LABEL: Record<Phase, StringKey> = {
 const LIVE_SETTINGS: (keyof Settings)[] = [
   "selected",
   "autoConnect",
+  "connectTimeout",
+  "absoluteBrowserLocation",
   "version",
   "killSwitch",
   "absoluteTimezone",
@@ -79,7 +81,7 @@ function usePrefersDark() {
 
 const EMPTY_STATUS: Status = {
   absoluteSupported: false,
-  absolute: { phase: "off", timezone: null, exitIp: null, error: null },
+  absolute: { phase: "off", timezone: null, exitIp: null, error: null, locationBlocked: false, browserLocationPolicy: false },
   session: null,
   firewall: false,
   blocked: false,
@@ -365,8 +367,8 @@ export default function App() {
   const togglePower = () => {
     if (busy) return;
     if (live) return disconnect();
-    if (!settings.selected) return toast("info", t("addServerFirst"));
-    return connect(settings.selected);
+    const id = profiles.find((p) => p.id === settings.selected)?.id ?? profiles[0]?.id;
+    return id ? connect(id) : openAdd();
   };
 
   const select = async (id: string) => {
@@ -389,7 +391,10 @@ export default function App() {
     if (absoluteChange) {
       try {
         await refreshStatus().catch(() => {});
-        if (saved && wasLive && settings.selected) await connect(settings.selected);
+        if (saved && (patch.absoluteMode === true || wasLive)) {
+          const id = profiles.find((p) => p.id === settings.selected)?.id ?? profiles[0]?.id;
+          if (id) await connect(id);
+        }
       } finally { setPending(null); }
       return;
     }
@@ -618,7 +623,9 @@ export default function App() {
   const health = session?.health;
   const traffic = session?.traffic;
   const unhealthy = phase === "connected" && health && !health.ok;
-  const rayState: RayState = status.blocked && !session ? "blocked" : unhealthy || phase === "reconnecting" ? "warning" : phase;
+  const blocked = status.blocked && !session && !busy;
+  const absoluteWaiting = blocked && settings.absoluteMode && !status.absolute.error;
+  const rayState: RayState = blocked ? "blocked" : unhealthy || phase === "reconnecting" ? "warning" : phase;
   // Apps can only be split in VPN mode; sites in every mode.
   const split = settings.split;
   const splitActive = !settings.absoluteMode && split.enabled && (split.sites.length > 0 || (settings.mode === "tun" && split.apps.length > 0));
@@ -681,7 +688,7 @@ export default function App() {
     [logs],
   );
 
-  const word = status.blocked && !session ? t("blockedTitle") : unhealthy ? t("noInternet") : t(PHASE_LABEL[phase]);
+  const word = absoluteWaiting ? t("absoluteWaiting") : blocked ? t("blockedTitle") : unhealthy ? t("noInternet") : t(PHASE_LABEL[phase]);
   const serverName = selected ? selected.name : t("noServerSelected");
   const powerLabel = live ? t("disconnect") : t("connect");
   const absolutePhase = status.absolute.error ? "error" : settings.absoluteMode ? status.absolute.phase : "off";
@@ -793,12 +800,12 @@ export default function App() {
           </div>
 
           <div className="stage-low" {...inert(snap > 0)}>
-          {status.blocked && !session && (
-            <div className="alert danger">
-              <span>{t(status.absolute.error ? "absoluteError" : settings.absoluteMode ? "absolutePreparing" : "blockedBanner")}</span>
+          {blocked && (
+            <div className={`alert ${absoluteWaiting ? "warn" : "danger"}`}>
+              <span>{t(status.absolute.error ? "absoluteError" : absoluteWaiting ? "absoluteWaitingHint" : "blockedBanner")}</span>
               <div className="alert-actions">
-                <button className="btn small primary" onClick={() => settings.selected && connect(settings.selected)} disabled={busy}>
-                  {t("reconnect")}
+                <button className="btn small primary" onClick={togglePower}>
+                  {t(!profiles.length ? "add" : absoluteWaiting ? "connect" : "reconnect")}
                 </button>
                 <button className="btn small" onClick={settings.absoluteMode || status.absolute.error ? () => setSheet("settings") : disconnect} disabled={busy}>
                   {t(settings.absoluteMode || status.absolute.error ? "settings" : "unblock")}

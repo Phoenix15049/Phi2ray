@@ -40,6 +40,14 @@ So I wrote my own. [Xray-core](https://github.com/XTLS/Xray-core) handles the pr
 [sing-box](https://github.com/SagerNet/sing-box) the VPN adapter. Phi2ray is the small Rust app in
 between that sets them up safely, watches them, and stays out of your way.
 
+## 0.2.3 (unreleased)
+
+- Absolute applies Windows location protection before connecting and offers an optional
+  Chrome and Edge policy. It tries the selected server when enabled.
+- Connection settings include a configurable startup timeout. Pressing Connect with an empty
+  list opens Add and checks the clipboard.
+- Import standard SOCKS5 links and see format-specific guidance for files from other clients.
+
 ## What's new in 0.2.2
 
 - Import advanced Xray JSON and XHTTP profiles, plus single-peer WireGuard and compatible
@@ -107,7 +115,8 @@ time you open Phi2ray.
 1. Click **Add**, then paste a link, Xray JSON, a WireGuard config or your subscription URL.
 2. Press the power button.
 
-That's it. Everything in Settings has a sensible default.
+With an empty list, the power button opens **Add** and offers a supported clipboard config,
+just like the **Add** button.
 
 ## What you get
 
@@ -115,6 +124,8 @@ That's it. Everything in Settings has a sensible default.
 
 - `vless://`, `vmess://`, `trojan://` and `ss://` links, plus base64 lists, with REALITY, XHTTP,
   WebSocket, gRPC, HTTPUpgrade and TLS.
+- Standard `socks5://` and `socks://` links, with optional username/password. Plain SOCKS5
+  is unencrypted and is rejected by Absolute.
 - Xray JSON exports and standalone outbounds (VLESS, VMess, Trojan, Shadowsocks, HTTP, SOCKS and WireGuard),
   including JSON arrays and base64 JSON subscriptions. XHTTP extra/download settings, VLESS
   encryption and TLS certificate pins are preserved. Paste JSON in **Add → Links**.
@@ -123,6 +134,9 @@ That's it. Everything in Settings has a sensible default.
   proxy settings, and **Proxy only** if you'd rather point apps at it yourself.
 - A real test: it sends a request through each server, so a server that's up but not working
   shows as failed. Unsafe servers get a small ⚠.
+- **Connection timeout** defaults to Automatic. Choose 5–120 seconds to require a successful
+  response from the configured test URL through the private proxy before opening user routes.
+  The timer starts when the local proxy is ready. Automatic keeps the background health checks.
 
 JSON imports take the proxy outbound; Phi2ray manages listeners, DNS, logging and routing itself.
 Chained/reverse proxies, external certificate files and transports removed from the bundled Xray
@@ -130,7 +144,7 @@ are rejected explicitly. The bundled core requires verified TLS; self-signed ser
 `pinnedPeerCertSha256` pin instead of `allowInsecure`. Sing-box/Clash JSON or YAML, Hysteria2 and
 TUIC are not supported by this importer.
 
-**WireGuard, TunSafe and NPV**
+**WireGuard, TunSafe and other clients' files**
 
 - Paste or choose a standard WireGuard or compatible TunSafe `.conf` under **Add → Links**.
   Single-peer UDP client configs support IPv4/IPv6 addresses, AllowedIPs, DNS IPs, MTU,
@@ -142,7 +156,13 @@ TUIC are not supported by this importer.
   turn off **Local network outside the VPN**.
   Absolute requires a full IPv4 route.
 - For NPV/NapsternetV use a supported standard share link, Xray JSON or WireGuard export
-  from the provider. Protected `.npv` files require a standard export from the provider.
+  from the provider. Phi2ray recognises protected `.npvs` files, including version 5
+  protection modes. To import their servers, ask the provider for a standard export or
+  a standard subscription URL.
+- The file picker and drag-and-drop recognise OpenVPN (`.ovpn`), DarkTunnel (`.dark`),
+  HTTP Custom (`.hc`), HTTP Injector (`.ehi`), SocksHTTP (`.sks`) and NetMod (`.nm`). Native
+  containers get a format-specific message. OpenVPN profiles need an OpenVPN client. For the
+  other clients, choose a standard share link or Xray JSON export from the provider.
 
 **Not leaking**
 
@@ -150,11 +170,14 @@ TUIC are not supported by this importer.
   badge. It rejects profiles marked unencrypted or unverified, requires whole-system VPN and
   kill switch, suspends all direct bypasses, blocks
   IPv6 user traffic and uses encrypted DNS through the tunnel. User traffic stays blocked while
-  the protected IPv4 exit and its estimated timezone are checked. Windows timezone, automatic
-  timezone adjustment and Windows location consent are backed up before changes. The timezone
-  follows the exit (or an explicit IANA override), with DST handled by Windows. Turning Absolute
-  off restores the saved Windows settings and normal routing preferences. Disconnecting alone
-  keeps the network blocked. A separate recovery process retries restoration after an app crash;
+  the protected IPv4 exit and its estimated timezone are checked. On enable, Absolute backs up
+  the Windows settings, applies the Windows Location block and switches off automatic timezone
+  adjustment before the first connection. It immediately tries the selected server, or the first
+  server if none is selected. An opted-in Chrome/Edge policy also blocks geolocation by default.
+  Site exceptions managed by your organisation can take precedence. The timezone follows
+  the exit (or an explicit IANA override), with DST handled by Windows. Turning Absolute off
+  restores the saved Windows and opted-in browser policies. Disconnecting alone keeps the
+  network and Location blocked. A separate recovery process retries restoration after an app crash;
   power loss may require recovery on the next launch. Absolute firewall rules persist across
   reboots: open Phi2ray and disable Absolute to restore normal access. The app's normal Quit
   restores Windows settings and releases the block.
@@ -164,7 +187,8 @@ TUIC are not supported by this importer.
   activation. Exit geolocation is approximate and checked periodically; rotating exits cannot
   guarantee one timezone for every request. Loopback, DHCP, IPv6 neighbour discovery, VPN
   transport and the app's limited encrypted DNS bootstrap remain necessary exceptions. Windows
-  location consent does not control every third-party location provider.
+  location policy controls the Windows location service and supported APIs. Apps can still
+  obtain location clues through other hardware, account data or saved information.
 
   Timezone mapping data and aliases come from Unicode CLDR 48 (`windowsZones.xml`,
   `supplementalMetadata.xml`, `bcp47/timezone.xml`); see
@@ -279,8 +303,8 @@ For the release, run these commands from the final commit on `main`:
 ```bash
 node scripts/check-release-version.mjs
 git push origin main
-git tag -a v0.2.2 -m "Phi2ray 0.2.2"
-git push origin v0.2.2
+git tag -a v0.2.3 -m "Phi2ray 0.2.3"
+git push origin v0.2.3
 ```
 
 After the tagged run succeeds, open **Releases**, review the draft and its files and select
@@ -301,9 +325,11 @@ gh attestation verify <file> -R Phoenix15049/Phi2ray
 ## Things people ask
 
 **Google thinks I'm in Iran, but every other site shows the server's country.**
-That's Google's own location database, not a leak. If [ipleak.net](https://ipleak.net) and
-[browserleaks.com/webrtc](https://browserleaks.com/webrtc) don't show an Iranian IP or DNS server,
-you're fine.
+Check the location source at the bottom of the results. **From your device** can come from
+browser permission or a recent location cookie. **From your internet address** can reflect
+Google's country estimate for the exit IP. Compare the browser's public IP with **Connection
+info** using VPN mode and split tunnelling off. Connection info itself measures through the
+app's private proxy. [Google's location help](https://support.google.com/websearch/answer/179386)
 
 **It says connected, but nothing loads.**
 The button turns orange and says "No internet". Set the log level to *Info* in Settings, reconnect,

@@ -53,6 +53,25 @@ pub fn check(url: &str, via: &Via) -> Option<u32> {
     (200..300).contains(&status).then_some(ms)
 }
 
+/// The manual connection deadline measures the server through the private probe inbound.
+pub async fn wait_for_server(url: &str, proxy: &LocalProxy, limit: Duration) -> Result<(), String> {
+    let client = reqwest::Client::builder()
+        .proxy(proxy.for_reqwest()?)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| "Could not create the startup probe.")?;
+    tokio::time::timeout(limit, async {
+        loop {
+            if client.get(url).send().await.is_ok_and(|r| r.status().is_success()) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    })
+    .await
+    .map_err(|_| format!("The server did not pass the connection check within {} seconds.", limit.as_secs()))
+}
+
 pub fn exit_info(via: &Via) -> Option<ExitInfo> {
     let (_, status, body) = get(TRACE_URL, via, MAX_BODY)?;
     if status != 200 {

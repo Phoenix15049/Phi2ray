@@ -140,6 +140,9 @@ pub async fn fetch(url: &str, proxy: Option<&crate::probe::LocalProxy>) -> Resul
         }
         bytes.extend_from_slice(&chunk);
     }
+    if let Some(error) = parser::protected_npvs_error(&bytes) {
+        return Err(error);
+    }
     let body = String::from_utf8_lossy(&bytes);
 
     let parser::Parsed { profiles, skipped, errors } = parser::parse_many(&body);

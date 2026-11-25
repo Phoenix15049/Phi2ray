@@ -58,11 +58,14 @@ pub struct Settings {
     pub mode: Mode,
     pub selected: Option<String>,
     pub auto_connect: bool,
+    /// Seconds to wait for the initial server probe; None keeps automatic health checks.
+    pub connect_timeout: Option<u16>,
 
     // Protection
     /// Block all traffic outside the connection while connected or reconnecting.
     pub kill_switch: bool,
     pub absolute_mode: bool,
+    pub absolute_browser_location: bool,
     /// Empty means derive the IANA zone from the VPN exit; otherwise an explicit override.
     pub absolute_timezone: String,
     /// Recover from drops without tearing the tunnel down.
@@ -115,8 +118,10 @@ impl Default for Settings {
             mode: Mode::Tun,
             selected: None,
             auto_connect: false,
+            connect_timeout: None,
             kill_switch: true,
             absolute_mode: false,
+            absolute_browser_location: false,
             absolute_timezone: String::new(),
             auto_reconnect: true,
             bypass_lan: true,
@@ -160,6 +165,9 @@ impl Settings {
     pub fn validate(&self) -> Result<(), String> {
         if self.absolute_mode && !cfg!(windows) { return Err("Absolute mode is currently available on Windows only.".into()); }
         if !self.absolute_timezone.is_empty() { crate::absolute::windows_zone(&self.absolute_timezone)?; }
+        if self.connect_timeout.is_some_and(|seconds| !(5..=120).contains(&seconds)) {
+            return Err("Connection timeout must be between 5 and 120 seconds.".into());
+        }
         if !matches!(self.tun_stack.as_str(), "mixed" | "system" | "gvisor") {
             return Err("Unknown network stack.".into());
         }
@@ -402,5 +410,17 @@ mod tests {
         Settings::default().validate().unwrap();
         let bad = Settings { tun_mtu: 100, ..Settings::default() };
         assert!(bad.validate().is_err());
+    }
+
+    #[test]
+    fn connection_timeout_defaults_to_automatic_and_has_bounds() {
+        let settings: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(settings.connect_timeout, None);
+        for seconds in [5, 30, 120] {
+            assert!(Settings { connect_timeout: Some(seconds), ..Settings::default() }.validate().is_ok());
+        }
+        for seconds in [0, 4, 121] {
+            assert!(Settings { connect_timeout: Some(seconds), ..Settings::default() }.validate().is_err());
+        }
     }
 }
