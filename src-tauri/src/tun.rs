@@ -58,8 +58,12 @@ pub fn build(t: &TunInput) -> Result<Value, String> {
         // Second line of defence against loops: xray's own traffic always leaves directly.
         // Matched by full path, so another program named xray.exe stays in the tunnel.
         xray_rule(t.xray_exe),
-        json!({ "ip_cidr": [server_cidr], "outbound": "direct" }),
     ];
+    // The Linux helper gives both cores an exclusive UID, which auto_route already excludes.
+    // Windows still needs an OS route for the server to avoid feeding Xray into its own tunnel.
+    if t.core_uid.is_none() {
+        route_rules.push(json!({ "ip_cidr": [server_cidr], "outbound": "direct" }));
+    }
     let mut dns_rules = Vec::new();
     if s.absolute_mode {
         // Capture IPv6, then reject it; changing DNS preference alone does not block IPv6.
@@ -133,7 +137,6 @@ pub fn build(t: &TunInput) -> Result<Value, String> {
             "mtu": s.tun_mtu,
             "auto_route": true,
             "strict_route": s.strict_route,
-            "route_exclude_address": [server_cidr],
             "stack": s.tun_stack
         }],
         "outbounds": [
@@ -157,6 +160,8 @@ pub fn build(t: &TunInput) -> Result<Value, String> {
     });
     if let Some(uid) = t.core_uid {
         config["inbounds"][0]["exclude_uid"] = json!([uid]);
+    } else {
+        config["inbounds"][0]["route_exclude_address"] = json!([server_cidr]);
     }
     Ok(config)
 }
@@ -286,6 +291,8 @@ mod tests {
         let plain = Settings::default();
         let c = linux(&plain);
         assert_eq!(c["inbounds"][0]["exclude_uid"], json!([990]));
+        assert!(c["inbounds"][0].get("route_exclude_address").is_none());
+        assert!(c["route"]["rules"].as_array().unwrap().iter().all(|rule| rule["ip_cidr"][0] != "203.0.113.7/32"));
         assert_eq!(c["dns"]["servers"][2], json!({ "type": "udp", "tag": "local", "server": "192.168.1.1" }));
         check_tun_config(&c, 990).unwrap();
 

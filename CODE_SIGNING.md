@@ -4,7 +4,14 @@ Free code signing provided by [SignPath.io](https://about.signpath.io), certific
 [SignPath Foundation](https://signpath.org)
 
 > This applies once signing is approved and active. A release is signed if its exe shows
-> SignPath Foundation as publisher; earlier releases aren't signed.
+> SignPath Foundation as publisher.
+
+For a tagged build, configure the repository Actions variables `SIGNPATH_ORGANIZATION_ID`,
+`SIGNPATH_PROJECT_SLUG` and `SIGNPATH_POLICY_SLUG` and the Actions secret
+`SIGNPATH_API_TOKEN`. The Windows job requires a valid Authenticode signature and a timestamp
+when SignPath is configured. Set the repository Actions variable
+`ALLOW_UNSIGNED_WINDOWS_RELEASE=true` only when intentionally releasing without SignPath.
+Manual workflow runs produce a separate unsigned test artifact.
 
 ## What gets signed
 
@@ -44,7 +51,7 @@ Phi2ray changes the system only as you choose in the app, and each option says w
 ## Removing Phi2ray
 
 **On Linux**, remove the package (`sudo apt remove phi2ray`, `sudo dnf remove phi2ray` or
-`sudo pacman -R phi2ray-bin`), or for the AppImage delete it and `/opt/phi2ray`. Your saved servers
+`sudo pacman -R phi2ray-bin`), or delete the AppImage file. Your saved servers
 are in `~/.local/share/com.phi2ray.app`. The package leaves the small `phi2ray-core` system account
 behind; `sudo userdel phi2ray-core` removes it.
 

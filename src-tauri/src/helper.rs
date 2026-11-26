@@ -5,7 +5,7 @@
 //! password. It then stays for as long as the app does, so that happens once per session at most.
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -20,14 +20,13 @@ use crate::xray::{push_log, Logs, PORT_TAKEN};
 
 /// Where packages install the helper and the cores. Only root can write there.
 const INSTALLED: &str = "/usr/lib/phi2ray";
-/// Where the AppImage puts them, once, since root can't read inside a running AppImage.
-const APPIMAGE_INSTALLED: &str = "/opt/phi2ray";
 const HELPER: &str = "phi2ray-helper";
 
 /// Time for the person at the keyboard to type a password.
 const PASSWORD_TIMEOUT: Duration = Duration::from_secs(300);
 /// Starting a core waits for it inside the helper, up to 25 seconds for the adapter.
 const CALL_TIMEOUT: Duration = Duration::from_secs(40);
+const MAX_RESPONSE_BYTES: usize = 32 * 1024;
 
 struct Link {
     stdin: Mutex<ChildStdin>,
@@ -111,9 +110,11 @@ pub fn ensure() -> Result<(), String> {
     thread::spawn(move || listener.listen(stdout));
     let reader = link.clone();
     thread::spawn(move || {
-        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+        let mut stderr = BufReader::new(stderr);
+        let mut bytes = Vec::new();
+        while let Ok(Some(_)) = crate::bounded_lines::read(&mut stderr, &mut bytes, crate::bounded_lines::LOG_BYTES) {
             // pkexec's own remarks and the helper's, both useful if starting fails.
-            *reader.complaint.lock().unwrap() = line;
+            *reader.complaint.lock().unwrap() = String::from_utf8_lossy(&bytes).trim_end_matches('\r').to_owned();
         }
     });
 
@@ -134,8 +135,11 @@ pub fn ensure() -> Result<(), String> {
 
 impl Link {
     fn listen(&self, stdout: impl std::io::Read) {
-        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            match serde_json::from_str::<Message>(&line) {
+        let mut stdout = BufReader::new(stdout);
+        let mut bytes = Vec::new();
+        while let Ok(Some(truncated)) = crate::bounded_lines::read(&mut stdout, &mut bytes, MAX_RESPONSE_BYTES) {
+            if truncated { continue; }
+            match serde_json::from_slice::<Message>(&bytes) {
                 Ok(Message::Reply { id, outcome }) => {
                     if let Some(waiting) = self.pending.lock().unwrap().remove(&id) {
                         let _ = waiting.send(outcome);
@@ -165,16 +169,16 @@ impl Link {
 
     fn call(&self, command: Command, timeout: Duration) -> Result<Outcome, String> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        let (answer, wait) = mpsc::channel();
-        self.pending.lock().unwrap().insert(id, answer);
         let mut line = serde_json::to_vec(&Request { id, command }).map_err(|e| e.to_string())?;
         line.push(b'\n');
+        let (answer, wait) = mpsc::channel();
+        self.pending.lock().unwrap().insert(id, answer);
         let gone = || "Phi2ray's helper stopped. Connect again.".to_string();
-        {
+        let sent = {
             let mut stdin = self.stdin.lock().unwrap();
-            stdin.write_all(&line).and_then(|()| stdin.flush()).map_err(|_| gone())?;
-        }
-        let answer = wait.recv_timeout(timeout).map_err(|_| gone());
+            stdin.write_all(&line).and_then(|()| stdin.flush())
+        };
+        let answer = sent.map_err(|_| gone()).and_then(|()| wait.recv_timeout(timeout).map_err(|_| gone()));
         self.pending.lock().unwrap().remove(&id);
         answer
     }
@@ -259,70 +263,26 @@ pub fn verify_kill_switch() -> Result<(), String> {
     expect_done(require()?.call(Command::VerifyKillSwitch, CALL_TIMEOUT)?)
 }
 
-/// The helper to run: the one from the package, or the AppImage's own copy.
-fn locate() -> Result<PathBuf, String> {
-    let installed = Path::new(INSTALLED).join(HELPER);
-    if installed.exists() {
-        return Ok(installed);
-    }
-    if let Some(app_dir) = std::env::var_os("APPDIR") {
-        install_from_appimage(&PathBuf::from(app_dir))?;
-        return Ok(Path::new(APPIMAGE_INSTALLED).join(HELPER));
-    }
-    let copied = Path::new(APPIMAGE_INSTALLED).join(HELPER);
-    if copied.exists() {
-        return Ok(copied);
-    }
-    Err("Phi2ray's helper isn't installed. Install the package for your system to use VPN mode and the kill switch.".into())
+pub fn verify_xray_listeners(ports: &[u16]) -> bool {
+    require().and_then(|link| {
+        expect_done(link.call(Command::VerifyXrayListeners { ports: ports.to_vec() }, Duration::from_secs(2))?)
+    }).is_ok()
 }
 
-/// Root can't read inside a mounted AppImage, and a copy in a folder the user can write to could
-/// be swapped. So the helper and cores are streamed into `/opt/phi2ray`, which belongs to root,
-/// the first time they're needed and after an update. This asks for the password once more.
-fn install_from_appimage(app_dir: &Path) -> Result<(), String> {
-    let version = format!("{}:{VERSION}", env!("CARGO_PKG_VERSION"));
-    let target = Path::new(APPIMAGE_INSTALLED);
-    if std::fs::read_to_string(target.join("VERSION")).is_ok_and(|v| v.trim() == version) {
-        return Ok(());
-    }
-    const PAYLOAD: &[&str] = &["phi2ray-helper", "xray", "sing-box", "libcronet.so", "geoip.dat", "geosite.dat", "com.phi2ray.helper.policy"];
-    const SCRIPT: &str = r#"set -e
-version="$1"
-shift
-new="$(mktemp -d /opt/phi2ray.XXXXXX)"
-trap 'rm -rf -- "$new"' EXIT
-tar -xf - -C "$new" --no-same-owner --no-same-permissions -- "$@"
-for file in "$@"; do
-    test -f "$new/$file" && test ! -L "$new/$file" || exit 1
-done
-chmod 755 "$new" "$new/phi2ray-helper" "$new/xray" "$new/sing-box"
-chmod 644 "$new/libcronet.so" "$new/geoip.dat" "$new/geosite.dat" "$new/com.phi2ray.helper.policy"
-if [ -f "$new/com.phi2ray.helper.policy" ] && [ -d /usr/share/polkit-1/actions ]; then
-    install -m 644 "$new/com.phi2ray.helper.policy" /usr/share/polkit-1/actions/
-fi
-printf '%s\n' "$version" > "$new/VERSION"
-rm -rf /opt/phi2ray
-mv "$new" /opt/phi2ray
-"#;
-    let mut tar = host_command("tar")
-        .arg("-C")
-        .arg(app_dir.join("usr/lib/phi2ray"))
-        .args(["-cf", "-", "--"]).args(PAYLOAD)
-        .stdout(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Cannot read the AppImage: {e}"))?;
-    let files = tar.stdout.take().ok_or("Cannot read the AppImage.")?;
-    let status = host_command("pkexec")
-        .args(["/bin/sh", "-c", SCRIPT, "sh", &version]).args(PAYLOAD)
-        .stdin(Stdio::from(files))
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map_err(|e| format!("Cannot run pkexec: {e}"))?;
-    let _ = tar.wait();
-    match status.code() {
-        Some(0) => Ok(()),
-        Some(126) => Err("Administrator permission was not granted.".into()),
-        _ => Err("Phi2ray couldn't set up its helper in /opt/phi2ray.".into()),
+/// Only launch the helper installed by a system package. The AppImage runs as the user.
+fn locate() -> Result<PathBuf, String> {
+    use std::os::unix::fs::MetadataExt;
+
+    let installed = Path::new(INSTALLED).join(HELPER);
+    let trusted = installed.ancestors().all(|path| {
+        std::fs::symlink_metadata(path).is_ok_and(|meta| {
+            !meta.is_symlink() && meta.uid() == 0 && meta.mode() & 0o022 == 0
+                && if path == installed { meta.is_file() } else { meta.is_dir() }
+        })
+    });
+    if trusted {
+        Ok(installed)
+    } else {
+        Err("An installed Phi2ray helper is required. Install the matching system package to use VPN mode or the kill switch.".into())
     }
 }

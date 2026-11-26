@@ -13,6 +13,9 @@ does under the hood and why.
   connection to Xray, so any transport Xray supports also works in VPN mode.
 - **Xray** talks to your server. Its own connection is routed around the tunnel by the system
   itself, so it can't loop back into it.
+- On Linux the cores use a dedicated route exemption by UID. On Windows the VPN server's IP
+  needs a host route outside the TUN. Keep the kill switch on to block ordinary applications
+  from using that route directly.
 - Your server details reach the cores through stdin and are never written to disk as plain text.
 
 ## Windows and Linux
@@ -23,7 +26,7 @@ how they get the rights a VPN needs.
 | | Windows | Linux |
 |---|---|---|
 | Who runs as admin | The whole app (one UAC prompt at start) | Only `phi2ray-helper`, started through `pkexec` the first time it's needed |
-| Cores live in | `C:\Program Files\Phi2ray`, unpacked from the exe | `/usr/lib/phi2ray`, from the package (`/opt/phi2ray` for the AppImage) |
+| Cores live in | `C:\Program Files\Phi2ray`, unpacked from the exe | `/usr/lib/phi2ray`, from the package. AppImage bundles cores for unprivileged proxy use. |
 | Cores run as | Elevated | The `phi2ray-core` system account, not root |
 | Kill switch | Windows Filtering Platform | An nftables table |
 | Saved servers | DPAPI | A key in the desktop's keyring |
@@ -57,25 +60,32 @@ It's a set of firewall rules, not a timer. While it's on, only these get out:
 - the two cores. On Windows only as Phi2ray starts them, with administrator rights. On Linux only
   the `phi2ray-core` account, which only root can use,
 - traffic through the VPN adapter,
-- DHCP and IPv6 link-local, so your network keeps working,
+- DHCP and selected IPv6 link-local traffic, so your network keeps working. Windows matches
+  DHCP traffic to the Windows DHCP service. Linux matches the client and server UDP ports,
 - your local network, if you want printers and the router to stay reachable.
 
-It fails closed. If Phi2ray crashes, the rules stay and the app offers to reconnect or unblock
+If Phi2ray crashes while the kill switch is active, the rules stay and the app offers to reconnect or unblock
 when opened again. Restarting clears ordinary rules. Absolute uses persistent Windows rules.
+The ordinary kill switch starts protecting traffic during a connection attempt and releases the
+block after a first failed attempt from idle. An already protected connection keeps its block.
 While connected, Phi2ray checks its Windows filter identities or compares the live Linux table
 with the rules recorded by the helper.
 
+On Windows, Phi2ray also checks which interface the OS selects for sample public routes before
+reporting VPN mode ready and periodically while connected. The check sends no packets.
+
 Replacing the rules never leaves a gap: Windows adds the new set before removing the old one, and
-Linux swaps them in a single nftables transaction. On Linux the rules also cover forwarded
-traffic, so containers and virtual machines can't go around them.
+Linux swaps them in a single nftables transaction. The Linux rules cover forwarding through
+the host's nftables chain. VM, container and bridge coverage depends on the host network setup.
 
 ## Keeping things private
 
-- Local proxy ports are random each time and only reachable from this computer. SOCKS always asks
-  for a username and password, and VPN mode has no HTTP port at all. The proxy modes do have an HTTP
-  port without a password, because system proxy settings can't hold one.
-- Before Xray counts as started, Phi2ray checks the owners of all expected listeners. Xray
-  recovery withdraws its dependants and rotates automatic endpoints and credentials.
+- The SOCKS port and Manual mode's HTTP port require credentials. Click the endpoints to copy
+  connection URLs. System proxy mode's loopback HTTP port is open to local programs for
+  compatibility. VPN mode exposes only the authenticated endpoints used by Phi2ray and the adapter.
+- Phi2ray checks the owners of the expected TCP listeners on startup and during connection
+  monitoring. Xray recovery withdraws its dependants and rotates automatic endpoints and
+  credentials. This check does not cover dynamic UDP sockets or replace packet-level verification.
 - In System proxy mode, automatic proxy detection (WPAD) and setup scripts are off while you're
   connected, so a fake one on public Wi-Fi can't send your browser around the proxy.
 - Your server's name is looked up over encrypted DNS first. Ordinary mode may fall back to a

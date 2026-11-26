@@ -3,7 +3,7 @@
 //! so credentials never touch the disk in plain text.
 
 use std::collections::VecDeque;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufReader, Read, Write};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -224,9 +224,8 @@ impl Core {
         if !self.xray_alive() { return false; }
         match &self.xray {
             Some(Process::Local(child)) => matches!(port_state(child.id(), ports), PortState::Ready),
-            // The root helper checks ownership when starting cores under its separate account.
             #[cfg(not(windows))]
-            Some(Process::Helped(_)) => true,
+            Some(Process::Helped(_)) => crate::helper::verify_xray_listeners(ports),
             None => false,
         }
     }
@@ -278,8 +277,11 @@ impl Core {
 /// the log view is open, so a chatty core can't slow the window down.
 fn pipe(logs: Logs, tag: &'static str, stream: impl Read + Send + 'static) {
     thread::spawn(move || {
-        for line in BufReader::new(stream).lines().map_while(Result::ok) {
-            push_log(&logs, format!("[{tag}] {line}"));
+        let mut reader = BufReader::new(stream);
+        let mut bytes = Vec::new();
+        while let Ok(Some(_)) = crate::bounded_lines::read(&mut reader, &mut bytes, crate::bounded_lines::LOG_BYTES) {
+            let line = String::from_utf8_lossy(&bytes);
+            push_log(&logs, format!("[{tag}] {}", line.trim_end_matches('\r')));
         }
     });
 }

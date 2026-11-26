@@ -92,10 +92,11 @@ pub fn exit_info(proxy: &LocalProxy) -> Option<ExitInfo> {
 }
 
 /// Total bytes (up, down) through the proxy outbound, from xray's localhost metrics endpoint.
-pub fn xray_traffic(metrics_port: u16) -> Option<(u64, u64)> {
+pub fn xray_traffic(metrics: &LocalProxy) -> Option<(u64, u64)> {
     tauri::async_runtime::block_on(async {
-        let url = format!("http://127.0.0.1:{metrics_port}/debug/vars");
-        let response = client(None).ok()?.get(url).timeout(Duration::from_millis(750)).send().await.ok()?;
+        let response = client(Some(metrics)).ok()?.get("http://127.0.0.1/debug/vars")
+            .timeout(Duration::from_millis(750)).send().await.ok()?;
+        if !response.status().is_success() { return None; }
         let body = bounded_body(response, 256 * 1024).await?;
         parse_traffic(std::str::from_utf8(&body).ok()?)
     })

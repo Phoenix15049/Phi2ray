@@ -233,6 +233,7 @@ export const api = {
   connectionInfo: () => backend.call<ConnectionInfo>("connection_info"),
   /** The SOCKS link including its password; fetched only when the user copies it. */
   socksUrl: () => backend.call<string>("socks_url"),
+  httpUrl: () => backend.call<string>("http_url"),
   getLogs: () => backend.call<string[]>("get_logs"),
   clearLogs: () => backend.call<void>("clear_logs"),
   testDelays: (ids: string[] = []) => backend.call<void>("test_delays", { ids }),

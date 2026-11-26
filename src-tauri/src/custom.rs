@@ -81,6 +81,7 @@ pub(super) fn profile(root: &Value) -> Result<Profile, String> {
     if settings.as_object().unwrap().iter().any(|(k, v)| k.eq_ignore_ascii_case("reverse") && !v.is_null()) {
         return Err("reverse proxy settings are not supported".into());
     }
+    check_local_access(&settings)?;
     let address = strip_brackets(&text(&settings, "address"));
     if address.is_empty() || address.chars().any(char::is_whitespace) { return Err("missing or invalid server address".into()); }
     let port = settings["port"].as_u64().or_else(|| settings["port"].as_str()?.parse().ok())
@@ -110,12 +111,34 @@ pub(super) fn profile(root: &Value) -> Result<Profile, String> {
     };
     let mux = outbound.get("mux").filter(|v| !v.is_null()).cloned();
     if mux.as_ref().is_some_and(|v| !v.is_object()) { return Err("mux must be an object".into()); }
+    if let Some(mux) = &mux { check_local_access(mux)?; }
     Ok(Profile {
         id: new_id(), name: or(&name, &format!("{address}:{port}")), protocol, address, port, secret, method,
         flow: text(&settings, "flow"), alter_id: settings["alterId"].as_u64().unwrap_or(0) as u16,
         group_id: String::new(), stream, outbound_settings: Some(settings), mux,
         library: LibraryPreferences::default(),
     })
+}
+
+/// Reapply the import rules to stored profiles before passing their options to a core.
+pub(super) fn validate_saved(saved: &Profile) -> Result<Profile, String> {
+    let mut candidate = saved.clone();
+    if candidate.protocol == Protocol::Wireguard {
+        wireguard::parse_json(&json!({"settings": &candidate.outbound_settings}), &candidate.name)?;
+    } else {
+        if candidate.outbound_settings.as_ref().is_some_and(|settings| !settings.is_object()) {
+            return Err("outbound settings must be an object".into());
+        }
+        if let Some(options) = &mut candidate.stream.options {
+            normalize_stream(options, 0)?;
+        }
+    }
+    let mut valid = profile(&crate::config::for_export(&candidate))?;
+    valid.id.clone_from(&saved.id);
+    valid.name.clone_from(&saved.name);
+    valid.group_id.clone_from(&saved.group_id);
+    valid.library = saved.library.clone();
+    Ok(valid)
 }
 
 fn normalize_stream(v: &mut Value, depth: usize) -> Result<(), String> {
@@ -440,6 +463,19 @@ pub(crate) mod tests {
         assert!(parse_many("{\"outbounds\": BROKEN SECRET}").errors.iter().all(|e| !e.contains("SECRET")));
         let parsed = parse_many(&json!(vec![sample(true); MAX_PROFILES + 2]).to_string());
         assert_eq!((parsed.profiles.len(), parsed.skipped), (MAX_PROFILES, 2));
+    }
+
+    #[test]
+    fn saved_profiles_reapply_the_import_checks() {
+        let mut p = imported(&sample(true));
+        p.library.starred = true;
+        let validated = p.validated().unwrap();
+        assert_eq!(validated.id, p.id);
+        assert!(validated.library.starred);
+        p.stream.options = Some(json!({"network": "xhttp", "tlsSettings": {"masterKeyLog": "path"}}));
+        assert!(p.validated().is_err());
+        p.stream.options = Some(json!({"network": "xhttp", "xhttpSettings": "invalid"}));
+        assert!(p.validated().is_err());
     }
 
     #[test]

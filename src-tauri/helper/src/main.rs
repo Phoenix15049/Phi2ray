@@ -23,6 +23,10 @@ mod protocol;
 mod core_hashes;
 
 #[cfg(target_os = "linux")]
+#[path = "../../src/bounded_lines.rs"]
+mod bounded_lines;
+
+#[cfg(target_os = "linux")]
 mod helper;
 
 #[cfg(target_os = "linux")]

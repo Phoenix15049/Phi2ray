@@ -128,6 +128,10 @@ pub struct StreamView {
 }
 
 impl Profile {
+    pub fn validated(&self) -> Result<Self, String> {
+        custom::validate_saved(self).map_err(|error| format!("This saved profile cannot be used: {error}."))
+    }
+
     pub fn pin_downloads(&mut self, resolve: impl FnMut(&str, u16) -> Result<std::net::IpAddr, String>) -> Result<(), String> {
         custom::pin_downloads(self, resolve)
     }

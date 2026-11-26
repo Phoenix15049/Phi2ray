@@ -253,6 +253,11 @@ const handlers: Record<string, (args: Record<string, any>) => unknown> = {
     if (!session) throw "Not connected.";
     return `socks5://mockuser:mockpass@127.0.0.1:${session.socksPort}`;
   },
+  http_url: () => {
+    if (!session || session.mode === "tun") throw "No HTTP proxy.";
+    const address = `127.0.0.1:${session.httpPort}`;
+    return session.mode === "manual" ? `http://mockuser:mockpass@${address}` : address;
+  },
   check_connection: async () => {
     await wait(400);
     const health = { ok: true, ms: Math.round(120 + Math.random() * 400), checkedAt: Date.now() };

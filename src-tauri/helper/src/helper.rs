@@ -252,6 +252,17 @@ impl Helper {
                 };
                 self.reply(id, outcome);
             }
+            Command::VerifyXrayListeners { ports } => {
+                let running = self.running.lock().unwrap();
+                let owned = !ports.is_empty() && ports.len() <= 8 && running.xray.as_ref().is_some_and(|child| {
+                    listener_pids(&ports).is_some_and(|owners| matches!(ports_state(child.id(), &ports, &owners), Ports::Ready))
+                });
+                drop(running);
+                let outcome = if owned { Outcome::Done } else {
+                    Outcome::Failed { error: "Could not verify Xray's local listeners.".into() }
+                };
+                self.reply(id, outcome);
+            }
         }
     }
 
@@ -297,8 +308,11 @@ impl Helper {
     fn forward(self: &Arc<Self>, tag: &'static str, stream: impl Read + Send + 'static) {
         let helper = self.clone();
         thread::spawn(move || {
-            for line in BufReader::new(stream).lines().map_while(Result::ok) {
+            let mut reader = BufReader::new(stream);
+            let mut bytes = Vec::new();
+            while let Ok(Some(_)) = crate::bounded_lines::read(&mut reader, &mut bytes, crate::bounded_lines::LOG_BYTES) {
                 if !tag.is_empty() {
+                    let line = String::from_utf8_lossy(&bytes).trim_end_matches('\r').to_owned();
                     helper.send(&Message::Log { tag: tag.to_string(), line });
                 }
             }

@@ -33,7 +33,7 @@ pub fn trusted(exe: &Path) -> bool {
 #[cfg(feature = "embed-cores")]
 mod imp {
     use std::fs::{self, File};
-    use std::io::Read;
+    use std::io::{Read, Write};
     use std::os::windows::fs::OpenOptionsExt;
     use std::path::{Path, PathBuf};
     use std::ptr::null_mut;
@@ -67,11 +67,16 @@ mod imp {
     }
 
     pub fn install(dir: &Path) -> Result<(), String> {
-        fs::create_dir_all(dir).map_err(|e| format!("Cannot create {}: {e}", dir.display()))?;
+        crate::platform::create_admin_directory(dir)?;
         let mut locked = LOCKED.lock().unwrap();
         locked.clear();
         for file in FILES {
             let path = dir.join(file.name);
+            match fs::symlink_metadata(&path) {
+                Ok(_) => crate::platform::check_admin_entry(&path)?,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+                Err(e) => return Err(format!("Cannot inspect {}: {e}", path.display())),
+            }
             let handle = match lock_verified(&path, file) {
                 Ok(handle) => handle,
                 Err(_) => {
@@ -95,7 +100,8 @@ mod imp {
             let old = entry.file_name();
             let is_core = old.to_string_lossy().starts_with("core-");
             // Real folders only: a link is never followed into, just left alone.
-            if is_core && old != name && entry.file_type().is_ok_and(|t| t.is_dir()) {
+            if is_core && old != name && entry.file_type().is_ok_and(|t| t.is_dir())
+                && crate::platform::check_admin_entry(&entry.path()).is_ok() {
                 let _ = fs::remove_dir_all(entry.path());
             }
         }
@@ -123,8 +129,14 @@ mod imp {
     fn unpack(dir: &Path, file: &EmbeddedFile) -> Result<(), String> {
         let data = zstd::decode_all(file.data).map_err(|e| format!("Cannot unpack {}: {e}", file.name))?;
         let tmp = dir.join(format!("{}.tmp", file.name));
-        let _ = fs::remove_file(&tmp);
-        fs::write(&tmp, &data).map_err(|e| format!("Cannot write {}: {e}", tmp.display()))?;
+        match fs::remove_file(&tmp) {
+            Ok(()) => (),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+            Err(e) => return Err(format!("Cannot remove {}: {e}", tmp.display())),
+        }
+        fs::OpenOptions::new().write(true).create_new(true).open(&tmp)
+            .and_then(|mut file| file.write_all(&data))
+            .map_err(|e| format!("Cannot write {}: {e}", tmp.display()))?;
         let path = dir.join(file.name);
         fs::rename(&tmp, &path).map_err(|e| format!("Cannot replace {}: {e}", path.display()))
     }

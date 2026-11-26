@@ -10,6 +10,9 @@ Phi2ray only contacts other systems for the things below.
 
 - **Your servers and subscription links**, when you connect, test or update them. *Test* contacts
   each server directly, so it sees your real IP, as with any client.
+  While disconnected and unblocked, subscription refresh also runs directly. A refresh started
+  during a connection change reports that the connection is busy. Use HTTPS to protect
+  subscription links.
 - **Your DNS server** (Settings → DNS), for lookups in VPN mode. It's reached through your
   connection. The default is Cloudflare.
 - **Your test URL** (Settings → Diagnostics), to check that traffic gets through. It's requested

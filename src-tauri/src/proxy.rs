@@ -24,7 +24,7 @@ mod imp {
     /// Only this computer skips the proxy. Wildcards like `10.*` would also match host names
     /// such as `10.example.com`, which a web page could use to reach out without the proxy.
     /// Local network addresses still connect directly through xray's own LAN rule.
-    const BYPASS: &str = "localhost;127.0.0.1;[::1];<local>";
+    const BYPASS: &str = "localhost;127.0.0.1;[::1]";
 
     const PROXY_TYPE_DIRECT: u32 = 0x1;
     const PROXY_TYPE_PROXY: u32 = 0x2;

@@ -652,7 +652,7 @@ Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\tzautoupdate' Start $d
             .and_then(|p| p.parent().map(Path::to_path_buf))
             .ok_or("Recovery guard requires an embedded Windows release")?;
         let expected =
-            crate::admin_data_dir(&base).ok_or("Protected recovery folder unavailable")?.join("absolute-backup.json");
+            crate::admin_data_dir(&base)?.join("absolute-backup.json");
         if path != expected || parent == std::process::id() {
             return Err("Invalid recovery guard arguments".into());
         }

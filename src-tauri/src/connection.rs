@@ -180,7 +180,7 @@ pub fn connect(app: &AppHandle, state: &AppState, id: &str) -> Result<Session, S
 fn connect_locked(app: &AppHandle, state: &AppState, id: &str) -> Result<Session,String> {
     let (mut profile, settings) = {
         let mut store = state.store.lock().unwrap();
-        let profile = store.profiles.iter().find(|p| p.id == id).cloned().ok_or("Server not found.")?;
+        let profile = store.profiles.iter().find(|p| p.id == id).ok_or("Server not found.")?.validated()?;
         store.settings.selected = Some(id.to_string());
         store.save(&state.paths.store)?;
         (profile, crate::absolute::effective(&store.settings))
@@ -355,7 +355,7 @@ fn start(
         local_ports.push(http_port);
     }
     let proxy = LocalProxy { port: probe_port, user: probe_user, pass: probe_pass };
-    start_parts(state, settings, &xray_cfg, tun_cfg.as_ref(), &local_ports, &proxy)?;
+    start_parts(state, settings, &xray_cfg, tun_cfg.as_ref(), &local_ports, &proxy, server_ip)?;
     Ok(Link {
         session,
         profile: profile.clone(),
@@ -387,7 +387,16 @@ fn absolute_steps(mut step: impl FnMut(AbsoluteStep) -> Result<(),String>) -> Re
     Ok(())
 }
 
-fn start_parts(state: &AppState, settings: &Settings, xray_cfg: &Value, tun_cfg: Option<&Value>, local_ports: &[u16], proxy: &LocalProxy) -> Result<(), String> {
+fn start_parts(state: &AppState, settings: &Settings, xray_cfg: &Value, tun_cfg: Option<&Value>, local_ports: &[u16], proxy: &LocalProxy, server_ip: Option<IpAddr>) -> Result<(), String> {
+    let verify_routes = || {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match firewall::verify_tun_routes(server_ip, settings.ipv6) {
+                Err(_) if Instant::now() < deadline => thread::sleep(Duration::from_millis(100)),
+                result => return result,
+            }
+        }
+    };
     if settings.absolute_mode {
         return absolute_steps(|step| {
             match step {
@@ -405,6 +414,7 @@ fn start_parts(state: &AppState, settings: &Settings, xray_cfg: &Value, tun_cfg:
                 AbsoluteStep::UserProxy => state.core.lock().unwrap().start_xray(&state.paths.xray(),&state.paths.core,xray_cfg,local_ports)?,
                 AbsoluteStep::Tunnel => state.core.lock().unwrap().start_tun(&state.paths.sing_box(),&state.paths.work,tun_cfg.ok_or("Absolute needs a VPN adapter config")?)?,
                 AbsoluteStep::Activate => {
+                    verify_routes()?;
                     crate::absolute::verify_location(state, settings)?;
                     absolute_barrier(state, settings, true)?;
                     crate::absolute::phase(state, "active", None);
@@ -425,6 +435,14 @@ fn start_parts(state: &AppState, settings: &Settings, xray_cfg: &Value, tun_cfg:
         _ => {}
     }
     drop(core);
+    if cfg!(windows) && settings.mode == Mode::Tun {
+        verify_routes()?;
+        if settings.kill_switch {
+            let mut rules = firewall_rules(state, settings);
+            rules.tun_luid = Some(firewall::tun_luid()?);
+            firewall::enable(&rules)?;
+        }
+    }
     Ok(())
 }
 
@@ -505,8 +523,8 @@ pub(crate) fn teardown(state: &AppState) {
 
 /// Applies a kill switch change right away. The settings caller holds `state.switching`.
 pub fn apply_kill_switch(state: &AppState, settings: &Settings) -> Result<(), String> {
-    let connected = state.link.lock().unwrap().is_some();
-    if settings.kill_switch && connected && !firewall::verified() {
+    let live = state.link.lock().unwrap().as_ref().map(|link| (link.session.mode, link.session.state));
+    if settings.kill_switch && live.is_some() && !firewall::verified() {
         platform::elevate().map_err(|e| {
             if e == ADMIN_REQUIRED {
                 "The kill switch needs administrator rights. Restart Phi2ray as administrator.".to_string()
@@ -514,7 +532,11 @@ pub fn apply_kill_switch(state: &AppState, settings: &Settings) -> Result<(), St
                 e
             }
         })?;
-        firewall::enable(&firewall_rules(state, settings))?;
+        let mut rules = firewall_rules(state, settings);
+        if cfg!(windows) && live == Some((Mode::Tun, LinkState::Connected)) {
+            rules.tun_luid = Some(firewall::tun_luid()?);
+        }
+        firewall::enable(&rules)?;
         log(state, "[app] Kill switch on");
         // Only the cores' account gets past the kill switch, so an xray running as the user moves
         // there, using fresh private endpoints.
@@ -580,10 +602,15 @@ fn supervise(app: AppHandle, generation: u64) {
             let Ok(_guard) = state.switching.try_lock() else { continue };
             if !current() { return; }
             next_firewall_check = Instant::now() + Duration::from_secs(5);
-            let protected = state.link.lock().unwrap().as_ref().is_some_and(|l| l.session.kill_switch);
-            if protected {
-                if let Err(error) = firewall::verify() {
-                    log(&state, format!("[app] Kill switch could not be verified: {error}"));
+            let protection = state.link.lock().unwrap().as_ref().map(|link| (link.session.kill_switch,
+                link.session.mode, link.server_ip, link.settings.ipv6, link.session.state == LinkState::Connected));
+            if let Some((protected, mode, server_ip, ipv6, connected)) = protection {
+                let verified = if protected { firewall::verify() } else { Ok(()) };
+                let verified = verified.and_then(|()| {
+                    if connected && mode == Mode::Tun { firewall::verify_tun_routes(server_ip, ipv6) } else { Ok(()) }
+                });
+                if let Err(error) = verified {
+                    log(&state, format!("[app] Connection protection could not be verified: {error}"));
                     set_state(&state, LinkState::Reconnecting);
                     if let Err(error) = restart(&state) {
                         log(&state, format!("[app] Could not restore the protected connection: {error}"));
@@ -631,8 +658,10 @@ fn supervise(app: AppHandle, generation: u64) {
         }
 
         // 2. Traffic counters (a quick localhost request, so done every second).
-        let Some(metrics_port) = state.link.lock().unwrap().as_ref().map(|l| l.metrics_port) else { return };
-        match probe::xray_traffic(metrics_port) {
+        let Some(metrics) = state.link.lock().unwrap().as_ref().map(|link| LocalProxy {
+            port: link.metrics_port, user: link.probe_proxy.user.clone(), pass: link.probe_proxy.pass.clone(),
+        }) else { return };
+        match probe::xray_traffic(&metrics) {
             Some(raw) => {
                 let traffic = meter.sample(raw, Instant::now());
                 if let Some(link) = state.link.lock().unwrap().as_mut() {
@@ -641,7 +670,7 @@ fn supervise(app: AppHandle, generation: u64) {
             }
             None if !traffic_warned => {
                 traffic_warned = true;
-                log(&state, format!("[app] Traffic counters unavailable on 127.0.0.1:{metrics_port}"));
+                log(&state, format!("[app] Traffic counters unavailable on 127.0.0.1:{}", metrics.port));
             }
             None => {}
         }
@@ -739,13 +768,19 @@ fn restart(state: &AppState) -> Result<(), String> {
         settings.kill_switch = settings.absolute_mode || store.settings.kill_switch;
         settings.connect_timeout = store.settings.connect_timeout;
     }
-    let barrier = if settings.absolute_mode { absolute_barrier(state, &settings, false) } else { Ok(()) };
+    let barrier = if settings.absolute_mode {
+        absolute_barrier(state, &settings, false)
+    } else if cfg!(windows) && settings.kill_switch {
+        firewall::enable(&firewall_rules(state, &settings))
+    } else {
+        Ok(())
+    };
     restore_proxy(state);
     state.core.lock().unwrap().stop();
     let result = (|| {
         barrier?;
         if settings.mode == Mode::Tun || settings.kill_switch { platform::elevate()?; }
-        if settings.kill_switch && !settings.absolute_mode { firewall::enable(&firewall_rules(state, &settings))?; }
+        if !cfg!(windows) && settings.kill_switch { firewall::enable(&firewall_rules(state, &settings))?; }
         start(state, &profile, &settings, &address, ip)
     })();
     match result {

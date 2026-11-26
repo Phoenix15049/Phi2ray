@@ -11,7 +11,7 @@
 #
 # Tagged releases are signed through SignPath once the repository has the variables
 # SIGNPATH_ORGANIZATION_ID, SIGNPATH_PROJECT_SLUG and SIGNPATH_POLICY_SLUG and the secret
-# SIGNPATH_API_TOKEN. Until then they're published unsigned. See CODE_SIGNING.md.
+# SIGNPATH_API_TOKEN. Publishing unsigned requires ALLOW_UNSIGNED_WINDOWS_RELEASE=true.
 name: Release
 
 on:
@@ -40,6 +40,25 @@ jobs:
 
       - name: Check release versions and tag
         run: node scripts/check-release-version.mjs
+
+      - name: Check Windows signing policy
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        env:
+          PROJECT: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          ORGANIZATION: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          POLICY: ${{ vars.SIGNPATH_POLICY_SLUG }}
+          SIGNING_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+          ALLOW_UNSIGNED: ${{ vars.ALLOW_UNSIGNED_WINDOWS_RELEASE }}
+        run: |
+          if [ -n "$PROJECT$ORGANIZATION$POLICY" ]; then
+            if [ -z "$PROJECT" ] || [ -z "$ORGANIZATION" ] || [ -z "$POLICY" ] || [ -z "$SIGNING_TOKEN" ]; then
+              echo "::error::Incomplete SignPath configuration. Configure all three variables and the API token secret."
+              exit 1
+            fi
+          elif [ "$ALLOW_UNSIGNED" != "true" ]; then
+            echo "::error::Configure SignPath or explicitly set ALLOW_UNSIGNED_WINDOWS_RELEASE=true for an unsigned release."
+            exit 1
+          fi
 
       - name: Audit dependencies
         run: |
@@ -73,17 +92,30 @@ jobs:
           $download = @{ MaximumRetryCount = 3; RetryIntervalSec = 2; TimeoutSec = 120 }
           Invoke-WebRequest "https://github.com/XTLS/Xray-core/releases/download/v$env:XRAY_VERSION/Xray-windows-64.zip" -OutFile "$tmp/xray.zip" @download
           Invoke-WebRequest "https://github.com/SagerNet/sing-box/releases/download/v$env:SING_BOX_VERSION/sing-box-$env:SING_BOX_VERSION-windows-amd64.zip" -OutFile "$tmp/sing-box.zip" @download
-          Expand-Archive "$tmp/xray.zip" "$tmp/xray"
-          Expand-Archive "$tmp/sing-box.zip" "$tmp/sing-box"
-          Get-ChildItem "$tmp/xray" -Recurse -Include xray.exe, geoip.dat, geosite.dat | Copy-Item -Destination src-tauri/core/
-          Get-ChildItem "$tmp/sing-box" -Recurse -Include sing-box.exe, libcronet.dll | Copy-Item -Destination src-tauri/core/
+          foreach ($archive in @("xray", "sing-box")) {
+            $names = if ($archive -eq 'xray') { @('xray.exe', 'geoip.dat', 'geosite.dat') } else { @('sing-box.exe', 'libcronet.dll') }
+            $zip = [IO.Compression.ZipFile]::OpenRead("$tmp/$archive.zip")
+            try {
+              foreach ($name in $names) {
+                $entries = @($zip.Entries | Where-Object { $_.Name -ceq $name })
+                if ($entries.Count -ne 1 -or $entries[0].Length -le 0 -or $entries[0].Length -gt 256MB) {
+                  throw "$archive archive must contain exactly one expected $name of a valid size."
+                }
+                [IO.Compression.ZipFileExtensions]::ExtractToFile($entries[0], (Join-Path $tmp $name))
+              }
+            } finally { $zip.Dispose() }
+          }
           # The build itself refuses any file that doesn't match; this just says which one.
           foreach ($line in Get-Content src-tauri/core/SHA256SUMS) {
             $hash, $name = $line -split '\s+', 2
             $name = $name.TrimStart('*')
-            $actual = (Get-FileHash "src-tauri/core/$name" -Algorithm SHA256).Hash.ToLower()
+            $actual = (Get-FileHash "$tmp/$name" -Algorithm SHA256).Hash.ToLower()
             if ($actual -ne $hash) { throw "$name has SHA-256 $actual, but SHA256SUMS pins $hash." }
             "$name OK"
+          }
+          foreach ($line in Get-Content src-tauri/core/SHA256SUMS) {
+            $name = ($line -split '\s+', 2)[1].TrimStart('*')
+            Copy-Item -LiteralPath "$tmp/$name" -Destination src-tauri/core/
           }
 
       - name: Build
@@ -131,12 +163,17 @@ jobs:
       - name: Check the signature
         id: final
         shell: pwsh
+        env:
+          SIGNING_REQUIRED: ${{ github.event_name == 'push' && github.ref_type == 'tag' && vars.SIGNPATH_PROJECT_SLUG != '' }}
         run: |
           $exe = "release/$env:EXE_NAME"
-          $signed = Test-Path $exe
+          $signed = $env:SIGNING_REQUIRED -eq 'true'
           if ($signed) {
+            if (!(Test-Path -LiteralPath $exe -PathType Leaf)) { throw "SignPath did not return the expected executable." }
             $signature = Get-AuthenticodeSignature $exe
-            if ($signature.Status -ne 'Valid') { throw "The signature isn't valid: $($signature.StatusMessage)" }
+            if ($signature.Status -ne 'Valid' -or !$signature.SignerCertificate -or !$signature.TimeStamperCertificate) {
+              throw "The executable needs a valid, timestamped Authenticode signature: $($signature.StatusMessage)"
+            }
           } else {
             Copy-Item "unsigned/$env:EXE_NAME" $exe
           }
@@ -144,7 +181,7 @@ jobs:
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: phi2ray-windows-x64
+          name: ${{ github.event_name == 'workflow_dispatch' && 'phi2ray-windows-x64-test-unsigned' || 'phi2ray-windows-x64' }}
           path: release/
           if-no-files-found: error
 
@@ -154,6 +191,8 @@ jobs:
     runs-on: ubuntu-22.04
     permissions:
       contents: read
+    outputs:
+      deb_sha256: ${{ steps.packages.outputs.deb_sha256 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -181,6 +220,7 @@ jobs:
           npm run build:linux
 
       - name: Name the packages
+        id: packages
         run: |
           version="$(jq -r .version src-tauri/tauri.conf.json)"
           bundle=src-tauri/target/release/bundle
@@ -189,6 +229,8 @@ jobs:
           cp "$bundle"/rpm/*.rpm "release/Phi2ray-$version-linux-x86_64.rpm"
           cp "$bundle"/appimage/*.AppImage "release/Phi2ray-$version-linux-x86_64.AppImage"
           chmod +x release/*.AppImage
+          digest="$(sha256sum -- "release/Phi2ray-$version-linux-amd64.deb")"
+          echo "deb_sha256=${digest%% *}" >> "$GITHUB_OUTPUT"
 
       # VPN mode depends on these: the helper refuses a folder anyone but root can change.
       - name: Check what's inside the packages
@@ -205,13 +247,14 @@ jobs:
           fi
           cd "$RUNNER_TEMP"
           "$GITHUB_WORKSPACE"/release/*.AppImage --appimage-extract >/dev/null
-          for file in usr/bin/phi2ray usr/lib/phi2ray/phi2ray-helper usr/lib/phi2ray/xray usr/lib/phi2ray/sing-box usr/lib/phi2ray/com.phi2ray.helper.policy; do
+          for file in usr/bin/phi2ray usr/lib/phi2ray/xray usr/lib/phi2ray/sing-box usr/lib/phi2ray/libcronet.so usr/lib/phi2ray/geoip.dat usr/lib/phi2ray/geosite.dat; do
             [ -f "squashfs-root/$file" ] || { echo "$file is missing from the AppImage"; exit 1; }
           done
           # linuxdeploy rewrites programs it finds in the AppImage; these must still start.
           squashfs-root/usr/lib/phi2ray/xray version
           squashfs-root/usr/lib/phi2ray/sing-box version
-          squashfs-root/usr/lib/phi2ray/phi2ray-helper 2>&1 | grep -q "started by Phi2ray"
+          test ! -e squashfs-root/usr/lib/phi2ray/phi2ray-helper
+          test ! -e squashfs-root/usr/lib/phi2ray/com.phi2ray.helper.policy
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -240,8 +283,7 @@ jobs:
           path: release/*.AppImage
           archive: false
 
-  # Repackages the .deb, so it holds the very same files. A problem here doesn't hold the release
-  # back: Arch users can use the AppImage meanwhile.
+  # Repackages the tested .deb and verifies its digest before extraction.
   arch:
     needs: linux
     runs-on: ubuntu-latest
@@ -257,7 +299,10 @@ jobs:
           name: phi2ray-linux-x64
           path: linux
       - name: Build the package
+        env:
+          PHI2RAY_DEB_SHA256: ${{ needs.linux.outputs.deb_sha256 }}
         run: |
+          printf '%s\n' "$PHI2RAY_DEB_SHA256" | grep -Eq '^[[:xdigit:]]{64}$'
           pacman -Syu --noconfirm --needed base-devel
           useradd --create-home builder
           mkdir build
@@ -265,7 +310,7 @@ jobs:
           cp linux/*.deb build/
           chown -R builder build
           cd build
-          su builder -c 'makepkg --nodeps --noconfirm'
+          su builder -c 'PHI2RAY_DEB_SHA256="$1" makepkg --nodeps --noconfirm' sh "$PHI2RAY_DEB_SHA256"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: phi2ray-arch-x64
@@ -281,7 +326,7 @@ jobs:
 
   publish:
     needs: [windows, linux, arch]
-    if: ${{ !cancelled() && github.event_name == 'push' && github.ref_type == 'tag' && needs.windows.result == 'success' && needs.linux.result == 'success' }}
+    if: ${{ success() && github.event_name == 'push' && github.ref_type == 'tag' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write # draft release
@@ -319,7 +364,6 @@ jobs:
           TAG: ${{ github.ref_name }}
           ATTESTED: ${{ github.event.repository.visibility == 'public' }}
           SIGNED: ${{ needs.windows.outputs.signed }}
-          ARCH: ${{ needs.arch.result }}
         run: |
           commit="$(git rev-parse HEAD)"
           base="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG"
@@ -362,14 +406,12 @@ jobs:
             fi
             echo "Cores inside: Xray $XRAY_VERSION, sing-box $SING_BOX_VERSION"
             echo
-            if [ "$ARCH" != success ]; then
-              echo "The Arch package didn't build this time; the AppImage works on Arch too."
-              echo
-            fi
             if [ "$SIGNED" = true ]; then
               echo "Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org)"
-              echo
+            else
+              echo "The Windows executable in this release is unsigned. Verify its SHA-256 and build attestation before running it."
             fi
+            echo
             echo "[Code signing policy](https://github.com/$GITHUB_REPOSITORY/blob/main/CODE_SIGNING.md) | [Privacy policy](https://github.com/$GITHUB_REPOSITORY/blob/main/PRIVACY.md)"
           } > notes.md
           gh release create "$TAG" release/* --draft --verify-tag --title "Phi2ray $TAG" --notes-file notes.md

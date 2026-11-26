@@ -870,7 +870,7 @@ export default function App() {
 
           {live && session && session.mode !== "tun" && (
             <div className="endpoints">
-              <button className="endpoint" onClick={() => copy(`127.0.0.1:${session.httpPort}`)}>
+              <button className="endpoint" onClick={() => api.httpUrl().then(copy, (e) => toast("error", String(e)))}>
                 <span>HTTP</span>
                 <span className="ltr">127.0.0.1:{session.httpPort}</span> {Icon.copy()}
               </button>

@@ -104,13 +104,13 @@ pub fn build(p: &Profile, inb: &Inbounds, s: &Settings, assets: &Assets) -> Valu
         "policy": { "system": { "statsOutboundUplink": true, "statsOutboundDownlink": true } },
         "metrics": { "tag": "metrics" },
         "inbounds": [
-            // Serves the counters at http://127.0.0.1:<metrics_port>/debug/vars.
+            // Route the authenticated HTTP request to Xray's in-process metrics server.
             {
                 "tag": "metrics-in",
                 "listen": "127.0.0.1",
                 "port": inb.metrics_port,
-                "protocol": "dokodemo-door",
-                "settings": { "address": "127.0.0.1" }
+                "protocol": "http",
+                "settings": { "accounts": [{ "user": inb.probe_user, "pass": inb.probe_pass }] }
             },
             {
                 "tag": "socks",
@@ -141,14 +141,19 @@ pub fn build(p: &Profile, inb: &Inbounds, s: &Settings, assets: &Assets) -> Valu
         "routing": { "domainStrategy": "AsIs", "rules": rules }
     });
     // The HTTP inbound is for the proxy modes only (the system proxy and apps set up by hand).
-    // Windows can't send a password to a system proxy, so it has none; VPN mode doesn't open it.
+    // System mode remains compatible with apps that can't send proxy credentials.
     if s.mode != Mode::Tun {
+        let auth = if s.mode == Mode::Manual {
+            json!({ "accounts": [{ "user": inb.socks_user, "pass": inb.socks_pass }] })
+        } else {
+            json!({})
+        };
         config["inbounds"].as_array_mut().unwrap().push(json!({
             "tag": "http",
             "listen": "127.0.0.1",
             "port": inb.http_port,
             "protocol": "http",
-            "settings": {},
+            "settings": auth,
             "sniffing": sniffing
         }));
     }
@@ -342,16 +347,16 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn http_inbound_only_in_proxy_modes() {
+    fn http_inbound_requires_auth_in_manual_mode() {
         let p = parse_link("trojan://pw@a.com:443").unwrap();
         let assets = || Assets { geoip: false, geosite: false };
-        let has_http = |mode| {
+        let http = |mode| {
             let c = build(&p, &inbounds(), &Settings { mode, ..Settings::default() }, &assets());
-            c["inbounds"].as_array().unwrap().iter().any(|i| i["tag"] == "http")
+            c["inbounds"].as_array().unwrap().iter().find(|i| i["tag"] == "http").cloned()
         };
-        assert!(!has_http(Mode::Tun));
-        assert!(has_http(Mode::System));
-        assert!(has_http(Mode::Manual));
+        assert!(http(Mode::Tun).is_none());
+        assert!(http(Mode::System).unwrap()["settings"]["accounts"].is_null());
+        assert_eq!(http(Mode::Manual).unwrap()["settings"]["accounts"][0]["pass"], inbounds().socks_pass);
     }
 
     #[test]
@@ -409,23 +414,25 @@ pub(crate) mod tests {
         let write = |path: std::path::PathBuf, v: &Value| std::fs::write(path, serde_json::to_string_pretty(v).unwrap()).unwrap();
         let assets = Assets { geoip: true, geosite: true };
         for (name, link) in &samples {
-            let p = parse_link(link).unwrap();
+            let p = parse_link(link).unwrap().validated().unwrap();
             write(dir.join(format!("{name}.json")), &build(&p, &inbounds(), &Settings::default(), &assets));
         }
         for tls in [false, true] {
             let raw = crate::parser::custom::tests::sample(tls);
-            let p = crate::parser::parse_many(&raw.to_string()).profiles.remove(0);
+            let p = crate::parser::parse_many(&raw.to_string()).profiles.remove(0).validated().unwrap();
             let name = if tls { "custom-xhttp-pinned-tls" } else { "custom-xhttp-encryption" };
             write(dir.join(format!("{name}.json")), &build(&p, &inbounds(), &Settings::default(), &assets));
             write(dir.join(format!("{name}-delay.json")), &build_test(&p, 10803));
         }
         for (protocol, raw) in crate::parser::custom::tests::common_samples() {
-            let p = crate::parser::parse_many(&raw.to_string()).profiles.remove(0);
+            let p = crate::parser::parse_many(&raw.to_string()).profiles.remove(0).validated().unwrap();
             write(dir.join(format!("custom-{protocol}.json")), &build_test(&p, 10803));
         }
         let p = parse_link(&samples[0].1).unwrap();
         write(dir.join("all-options.json"), &build(&p, &inbounds(), &everything_on(), &assets));
         write(dir.join("delay-test.json"), &build_test(&p, 10803));
+        let manual = Settings { mode: Mode::Manual, ..Settings::default() };
+        write(dir.join("manual-proxy.json"), &build(&p, &inbounds(), &manual, &assets));
         let strict = crate::absolute::effective(&Settings{absolute_mode:true,..Settings::default()});
         let cfg = build(&p,&inbounds(),&strict,&assets);
         write(dir.join("absolute-ready.json"),&cfg);

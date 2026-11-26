@@ -61,10 +61,6 @@ mod imp {
     const RPC_C_AUTHN_DEFAULT: u32 = 0xFFFF_FFFF;
     const IPPROTO_UDP: u8 = 17;
 
-    // Must match the VPN adapter addresses in tun.rs.
-    const TUN_V4: (Ipv4Addr, u8) = (Ipv4Addr::new(172, 19, 0, 0), 30);
-    const TUN_V6: (Ipv6Addr, u8) = (Ipv6Addr::new(0xfdfe, 0xdcba, 0x9876, 0, 0, 0, 0, 0), 126);
-
     const LAN_V4: [(Ipv4Addr, u8); 6] = [
         (Ipv4Addr::new(10, 0, 0, 0), 8),
         (Ipv4Addr::new(172, 16, 0, 0), 12),
@@ -248,12 +244,16 @@ mod imp {
     impl ElevatedOnly {
         fn new() -> Result<Self, String> {
             // CC = FWP_ACTRL_MATCH_FILTER, the right WFP checks for user conditions.
-            let sddl = wide("O:BAD:(A;;CCRC;;;BA)(A;;CCRC;;;SY)");
+            Self::from_sddl("O:BAD:(A;;CCRC;;;BA)(A;;CCRC;;;SY)")
+        }
+
+        fn from_sddl(sddl: &str) -> Result<Self, String> {
+            let sddl = wide(sddl);
             let mut sd = null_mut();
             let mut size = 0u32;
             let ok = unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.as_ptr(), SDDL_REVISION_1, &mut sd, &mut size) };
             if ok == 0 || sd.is_null() {
-                return Err("Kill switch: couldn't build the administrator-only rule.".into());
+                return Err("Kill switch: couldn't build a Windows identity rule.".into());
             }
             Ok(Self { sd, blob: FWP_BYTE_BLOB { size, data: sd as *mut u8 } })
         }
@@ -273,6 +273,11 @@ mod imp {
         elevated: &mut FWP_BYTE_BLOB,
     ) -> Result<Vec<u64>, String> {
         let mut ids = Vec::new();
+        // NT SERVICE\Dhcp (the stable service SID from `sc showsid Dhcp`). The service
+        // needs unicast lease renewals as well as broadcasts, including on relayed networks.
+        let mut dhcp = ElevatedOnly::from_sddl(
+            "O:BAD:(A;;CCRC;;;S-1-5-80-2940520708-3855866260-481812779-327648279-1710889582)",
+        )?;
         let layers = [
             (FWPM_LAYER_ALE_AUTH_CONNECT_V4, false, true),
             (FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4, false, false),
@@ -307,28 +312,21 @@ mod imp {
                 ])?;
             }
 
-            // Traffic from the VPN adapter's own address goes into the tunnel.
-            let mut tun_v4 = v4_mask(TUN_V4);
-            let mut tun_v6 = v6_mask(TUN_V6);
-            let tun = if v6 { v6_condition(FWPM_CONDITION_IP_LOCAL_ADDRESS, &mut tun_v6) } else { v4_condition(FWPM_CONDITION_IP_LOCAL_ADDRESS, &mut tun_v4) };
-            if rules.strict {
-                if let Some(mut luid) = rules.tun_luid {
-                    // Match the actual packet path, not an address an app can bind locally.
-                    let field = if outbound { FWPM_CONDITION_IP_NEXTHOP_INTERFACE } else { FWPM_CONDITION_IP_ARRIVAL_INTERFACE };
-                    let mut interface = condition(field, FWP_MATCH_EQUAL, FWP_UINT64);
-                    interface.conditionValue.Anonymous.uint64 = &mut luid;
-                    f.add(13, FWP_ACTION_PERMIT, &mut [interface])?;
-                }
-            } else { f.add(13, FWP_ACTION_PERMIT, &mut [tun])?; }
+            if let Some(mut luid) = rules.tun_luid {
+                let field = if outbound { FWPM_CONDITION_IP_NEXTHOP_INTERFACE } else { FWPM_CONDITION_IP_ARRIVAL_INTERFACE };
+                let mut interface = condition(field, FWP_MATCH_EQUAL, FWP_UINT64);
+                interface.conditionValue.Anonymous.uint64 = &mut luid;
+                f.add(13, FWP_ACTION_PERMIT, &mut [interface])?;
+            }
 
-            // DHCP keeps the real adapter's address alive. Both ports must match (client to
-            // server), so a program can't slip out just by sending from the DHCP port.
+            // DHCP keeps the real adapter's address alive. Match its Windows service token.
             let (client_port, server_port) = if v6 { (546, 547) } else { (68, 67) };
             if v6 {
                 let dhcp_multicast = (Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 1, 2), 128);
                 for net in [LINK_V6[0], dhcp_multicast] {
                     let mut mask = v6_mask(net);
                     f.add(12, FWP_ACTION_PERMIT, &mut [
+                        sd_condition(FWPM_CONDITION_ALE_USER_ID, &mut dhcp.blob),
                         u8_condition(FWPM_CONDITION_IP_PROTOCOL, IPPROTO_UDP),
                         u16_condition(FWPM_CONDITION_IP_LOCAL_PORT, client_port),
                         u16_condition(FWPM_CONDITION_IP_REMOTE_PORT, server_port),
@@ -337,6 +335,7 @@ mod imp {
                 }
             } else {
                 f.add(12, FWP_ACTION_PERMIT, &mut [
+                    sd_condition(FWPM_CONDITION_ALE_USER_ID, &mut dhcp.blob),
                     u8_condition(FWPM_CONDITION_IP_PROTOCOL, IPPROTO_UDP),
                     u16_condition(FWPM_CONDITION_IP_LOCAL_PORT, client_port),
                     u16_condition(FWPM_CONDITION_IP_REMOTE_PORT, server_port),
@@ -493,7 +492,7 @@ mod imp {
             let m = v4_mask((Ipv4Addr::new(172, 16, 0, 0), 12));
             assert_eq!((m.addr, m.mask), (0xAC10_0000, 0xFFF0_0000));
             assert_eq!(v4_mask((Ipv4Addr::new(255, 255, 255, 255), 32)).mask, u32::MAX);
-            assert_eq!(v6_mask(TUN_V6).prefixLength, 126);
+            assert_eq!(v6_mask(LINK_V6[0]).prefixLength, LINK_V6[0].1);
         }
 
         #[test]
@@ -585,3 +584,59 @@ pub fn tun_luid() -> Result<u64, String> {
 
 #[cfg(not(windows))]
 pub fn tun_luid() -> Result<u64, String> { Err("Absolute mode requires Windows".into()) }
+
+/// Checks Windows' route selection without sending packets. Excludes the host route Xray needs.
+pub fn verify_tun_routes(server: Option<std::net::IpAddr>, ipv6: bool) -> Result<(), String> {
+    #[cfg(not(windows))]
+    {
+        let _ = (server, ipv6);
+        Ok(())
+    }
+    #[cfg(windows)]
+    {
+        use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+        use windows_sys::Win32::NetworkManagement::{
+            IpHelper::{ConvertInterfaceLuidToIndex, GetBestInterfaceEx},
+            Ndis::NET_LUID_LH,
+        };
+        use windows_sys::Win32::Networking::WinSock::{
+            AF_INET, AF_INET6, IN_ADDR, IN_ADDR_0, IN6_ADDR, IN6_ADDR_0,
+            SOCKADDR_IN, SOCKADDR_IN6, SOCKADDR_IN6_0,
+        };
+        let luid = NET_LUID_LH { Value: tun_luid()? };
+        let mut expected = 0;
+        if unsafe { ConvertInterfaceLuidToIndex(&luid, &mut expected) } != 0 {
+            return Err("Could not identify the VPN route interface.".into());
+        }
+        let ipv4 = [Ipv4Addr::new(1, 1, 1, 1), Ipv4Addr::new(149, 112, 112, 112)];
+        let ipv6_probes = [
+            Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111),
+            Ipv6Addr::new(0x2620, 0xfe, 0, 0, 0, 0, 0, 0xfe),
+        ];
+        let targets = ipv4.into_iter().map(IpAddr::V4).chain(ipv6_probes.into_iter().filter(|_| ipv6).map(IpAddr::V6));
+        for target in targets.filter(|ip| Some(*ip) != server) {
+            let mut selected = 0;
+            let status = unsafe {
+                match target {
+                    IpAddr::V4(ip) => {
+                        let address = SOCKADDR_IN { sin_family: AF_INET, sin_port: 0,
+                            sin_addr: IN_ADDR { S_un: IN_ADDR_0 { S_addr: u32::from_ne_bytes(ip.octets()) } },
+                            sin_zero: [0; 8] };
+                        GetBestInterfaceEx(std::ptr::addr_of!(address).cast(), &mut selected)
+                    }
+                    IpAddr::V6(ip) => {
+                        let address = SOCKADDR_IN6 { sin6_family: AF_INET6, sin6_port: 0, sin6_flowinfo: 0,
+                            sin6_addr: IN6_ADDR { u: IN6_ADDR_0 { Byte: ip.octets() } },
+                            Anonymous: SOCKADDR_IN6_0 { sin6_scope_id: 0 } };
+                        GetBestInterfaceEx(std::ptr::addr_of!(address).cast(), &mut selected)
+                    }
+                }
+            };
+            if status != 0 || selected != expected {
+                return Err(format!("Windows did not select the VPN adapter for the {} route.",
+                    if target.is_ipv4() { "IPv4" } else { "IPv6" }));
+            }
+        }
+        Ok(())
+    }
+}

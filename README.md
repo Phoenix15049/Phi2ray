@@ -40,13 +40,18 @@ So I wrote my own. [Xray-core](https://github.com/XTLS/Xray-core) handles the pr
 [sing-box](https://github.com/SagerNet/sing-box) the VPN adapter. Phi2ray is the small Rust app in
 between that sets them up safely, watches them, and stays out of your way.
 
-## 0.2.3 (unreleased)
+## What's new in 0.2.3
 
 - Absolute applies Windows location protection before connecting and offers an optional
   Chrome and Edge policy. It tries the selected server when enabled.
 - Connection settings include a configurable startup timeout. Pressing Connect with an empty
   list opens Add and checks the clipboard.
 - Import standard SOCKS5 links and see format-specific guidance for files from other clients.
+- Manual HTTP proxy and traffic statistics use authenticated loopback endpoints. Saved
+  profiles are checked before they can start a core.
+- The Windows kill switch uses the TUN interface identity and limits DHCP to the Windows
+  DHCP service. Subscription refresh cannot switch to a direct connection during reconnects.
+- AppImage VPN mode uses the same-version helper installed by a Linux package.
 
 ## What's new in 0.2.2
 
@@ -106,9 +111,9 @@ chmod +x Phi2ray-*-linux-x86_64.AppImage
 ./Phi2ray-*-linux-x86_64.AppImage
 ```
 
-The first time you connect in VPN mode, the system asks for your password. The AppImage asks twice
-that first time, because it also copies its helper to `/opt/phi2ray`. After that it's once each
-time you open Phi2ray.
+The AppImage can run in System proxy or Manual mode by itself, with the kill switch turned off.
+VPN mode and the kill switch require the matching system package, which installs the privileged
+helper. The system asks for permission when the helper starts.
 
 ## First steps
 
@@ -299,7 +304,12 @@ and lockfiles, audits dependencies, and verifies the pinned core hashes. For a t
 pushing the branch, choose **Actions → Release → Run workflow**. Download the Windows and Linux
 artifacts from that run.
 
-For the release, run these commands from the final commit on `main`:
+Before tagging, configure SignPath as described in [Code signing](CODE_SIGNING.md). To publish an
+unsigned Windows executable deliberately, set the repository Actions variable
+`ALLOW_UNSIGNED_WINDOWS_RELEASE` to `true`. A configured signing job must return a valid,
+timestamped executable.
+
+Run these commands from the final commit on `main` after the trial build succeeds.
 
 ```bash
 node scripts/check-release-version.mjs
@@ -310,7 +320,8 @@ git push origin v0.2.3
 
 After the tagged run succeeds, open **Releases**, review the draft and its files and select
 **Publish release**. If SignPath is configured, approve its request during the Windows job.
-The Linux artifacts include DEB, RPM and AppImage. A successful Arch job adds the Arch package.
+The draft includes the Windows executable, DEB, RPM, AppImage, Arch package and their SHA-256
+checksums. Arch packaging verifies the SHA-256 of the Debian package from the same run.
 
 ## Verify the release files
 

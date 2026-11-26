@@ -5,6 +5,7 @@
 compile_error!("Release builds must embed the cores: use `npm run build:exe`.");
 
 mod absolute;
+mod bounded_lines;
 mod config;
 mod connection;
 mod console;
@@ -311,10 +312,11 @@ fn set_group_sort(state: State<AppState>, id: String, by_delay: bool) -> Result<
 fn export_library_item(state: State<AppState>, kind: LibraryKind, id: String) -> Result<String, String> {
     let store = state.store.lock().unwrap();
     let export = match kind {
-        LibraryKind::Profile => config::for_export(store.profiles.iter().find(|p| p.id == id).ok_or("Server no longer exists.")?),
+        LibraryKind::Profile => config::for_export(&store.profiles.iter().find(|p| p.id == id).ok_or("Server no longer exists.")?.validated()?),
         LibraryKind::Group => {
             store.group(&id).ok_or("Group no longer exists.")?;
-            let profiles: Vec<_> = store.profiles.iter().filter(|p| p.group_id == id).map(config::for_export).collect();
+            let profiles: Vec<_> = store.profiles.iter().filter(|p| p.group_id == id)
+                .map(|p| p.validated().map(|p| config::for_export(&p))).collect::<Result<_, _>>()?;
             if profiles.is_empty() { return Err("This group has no servers to export.".into()); }
             serde_json::Value::Array(profiles)
         }
@@ -384,8 +386,7 @@ pub(crate) async fn add_subscription_url(app: &AppHandle, url: &str) -> Result<S
     if state.store.lock().unwrap().groups.iter().any(|g| g.subscription.as_ref().is_some_and(|s| s.url == url)) {
         return Err("This subscription is already added.".into());
     }
-    let proxy = proxy_port(&state)?;
-    let fetched = subscription::fetch(&url, proxy.as_ref()).await?;
+    let fetched = fetch_subscription(app, &url).await?;
 
     let id = new_id();
     let name = fetched.title.clone().unwrap_or_else(|| {
@@ -421,10 +422,7 @@ async fn refresh_subscription(app: &AppHandle, id: &str) -> Result<SubscriptionR
         let group = store.group(id).ok_or("That group no longer exists.")?;
         group.subscription.as_ref().ok_or("This group isn't a subscription.")?.url.clone()
     };
-    let fetched = match proxy_port(&state) {
-        Ok(proxy) => subscription::fetch(&url, proxy.as_ref()).await,
-        Err(error) => Err(error),
-    };
+    let fetched = fetch_subscription(app, &url).await;
 
     edit_library(&state, |store| {
         let sub = store.group_mut(id).and_then(|g| g.subscription.as_mut()).ok_or("This group was removed during the update.")?;
@@ -500,6 +498,27 @@ fn proxy_port(state: &AppState) -> Result<Option<probe::LocalProxy>, String> {
         return Err("Wait until the protected connection is ready.".into());
     }
     Ok(None)
+}
+
+async fn fetch_subscription(app: &AppHandle, url: &str) -> Result<subscription::Fetched, String> {
+    enum Fetch {
+        Direct(subscription::Fetched),
+        Proxied(String, probe::LocalProxy),
+    }
+    let url = url.to_owned();
+    // Keep idle-only direct requests inside the same guard used to change the connection.
+    // An already-proxied request can finish independently and never falls back to direct.
+    let fetch = blocking(app.clone(), move |_, state| {
+        let _idle = state.switching.try_lock().map_err(|_| "Wait until the connection is ready.".to_string())?;
+        match proxy_port(state)? {
+            Some(proxy) => Ok(Fetch::Proxied(url, proxy)),
+            None => tauri::async_runtime::block_on(subscription::fetch(&url, None)).map(Fetch::Direct),
+        }
+    }).await??;
+    match fetch {
+        Fetch::Direct(fetched) => Ok(fetched),
+        Fetch::Proxied(url, proxy) => subscription::fetch(&url, Some(&proxy)).await,
+    }
 }
 
 // ---------- Settings ----------
@@ -731,6 +750,17 @@ fn socks_url(state: State<AppState>) -> Result<String, String> {
     Ok(format!("socks5://{}:{}@127.0.0.1:{}", s.socks_user, s.socks_pass, s.socks_port))
 }
 
+#[tauri::command]
+fn http_url(state: State<AppState>) -> Result<String, String> {
+    let link = state.link.lock().unwrap();
+    let s = &link.as_ref().ok_or("Not connected.")?.session;
+    match s.mode {
+        store::Mode::Manual => Ok(format!("http://{}:{}@127.0.0.1:{}", s.socks_user, s.socks_pass, s.http_port)),
+        store::Mode::System => Ok(format!("127.0.0.1:{}", s.http_port)),
+        store::Mode::Tun => Err("VPN mode has no HTTP proxy.".into()),
+    }
+}
+
 /// The only pages the window may open: a fixed list, so the WebView can't open arbitrary URLs.
 const LINKS: [(&str, &str); 2] = [("github", "https://github.com/Phoenix15049"), ("site", "https://inosila.com/")];
 
@@ -810,11 +840,18 @@ pub(crate) async fn run_delay_tests(
             tauri::async_runtime::spawn(async move {
                 let _batch = batch;
                 let id = p.id.clone();
-                let prepared = if p.protocol == parser::Protocol::Wireguard && p.address.parse::<std::net::IpAddr>().is_err() {
+                let prepared = match p.validated() {
+                    Err(error) => {
+                        xray::push_log(&app.state::<AppState>().logs, format!("[app] {error}"));
+                        None
+                    }
+                    Ok(p) if p.protocol == parser::Protocol::Wireguard && p.address.parse::<std::net::IpAddr>().is_err() => {
                     blocking(app.clone(), move |_, state| {
                         connection::resolve_server(state, &p.address, p.port).map(|ip| connection::pin_address(&p, ip))
                     }).await.ok().and_then(Result::ok)
-                } else { Some(p) };
+                    }
+                    Ok(p) => Some(p),
+                };
                 let ms = match prepared {
                     Some(profile) => delay::test(&exe, &assets, &profile, &target).await,
                     None => None,
@@ -875,10 +912,23 @@ fn new_id() -> String {
 /// Phi2ray runs as administrator, and writing in the user's own AppData would let any program
 /// running as that user redirect the writes with links. Under Program Files only administrators
 /// can change anything; the store stays encrypted for the account (DPAPI) as before.
-fn admin_data_dir(base: &Path) -> Option<PathBuf> {
-    let dir = base.join("data").join(platform::current_user_sid()?);
-    std::fs::create_dir_all(&dir).ok()?;
-    Some(dir)
+#[cfg(windows)]
+fn admin_data_dir(base: &Path) -> Result<PathBuf, String> {
+    let sid = platform::current_user_sid().ok_or("Cannot identify the Windows account.")?;
+    let data = base.join("data");
+    let user = data.join(sid);
+    for dir in [base, &data, &user, &base.join("sing-box")] {
+        platform::create_admin_directory(dir)?;
+    }
+    for name in ["store.bin", "store.tmp", "proxy-backup.json", "proxy-backup.tmp", "absolute-backup.json"] {
+        let entry = user.join(name);
+        match std::fs::symlink_metadata(&entry) {
+            Ok(_) => platform::check_admin_entry(&entry)?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+            Err(e) => return Err(format!("Cannot inspect {}: {e}", entry.display())),
+        }
+    }
+    Ok(user)
 }
 
 fn find_core_dir(app: &AppHandle) -> PathBuf {
@@ -892,9 +942,8 @@ fn find_core_dir(app: &AppHandle) -> PathBuf {
     #[cfg(not(windows))]
     {
         candidates.insert(0, PathBuf::from("/usr/lib/phi2ray"));
-        candidates.insert(1, PathBuf::from("/opt/phi2ray"));
         if let Some(app_dir) = std::env::var_os("APPDIR") {
-            candidates.insert(2, PathBuf::from(app_dir).join("usr/lib/phi2ray"));
+            candidates.insert(1, PathBuf::from(app_dir).join("usr/lib/phi2ray"));
         }
     }
     #[cfg(debug_assertions)]
@@ -922,7 +971,6 @@ pub fn run() {
     builder
         .setup(|app| {
             let data = app.path().app_data_dir()?;
-            std::fs::create_dir_all(&data)?;
             let paths = Paths {
                 store: data.join("store.bin"),
                 proxy_marker: data.join("proxy-backup.json"),
@@ -936,38 +984,42 @@ pub fn run() {
                 helper::init(logs.clone());
                 store::set_key_folder(paths.data.clone());
             }
-            let mut legacy_marker = None;
             // Single-exe builds unpack their cores first; other builds use the core folder.
             // When unpacking fails they run no core at all: never one found next to the exe,
             // where anyone could have put it.
             let mut paths = paths;
             let core_error = match cores::target_dir() {
-                None => None,
-                Some(Ok(dir)) => {
-                    if let Some(parent) = dir.parent() {
-                        paths.work = parent.join("sing-box");
-                        if let Some(secure) = admin_data_dir(parent) {
-                            legacy_marker = Some(paths.proxy_marker.clone());
-                            Store::migrate(&paths.store, &secure.join("store.bin"));
-                            paths.store = secure.join("store.bin");
-                            paths.proxy_marker = secure.join("proxy-backup.json");
-                            paths.data = secure;
-                        }
+                None => {
+                    std::fs::create_dir_all(&paths.data)?;
+                    None
+                }
+                #[cfg(windows)]
+                Some(target) => {
+                    let (dir, secure, work) = target.and_then(|dir| {
+                        let parent = dir.parent().ok_or("Cannot find Phi2ray's protected directory.")?;
+                        let secure = admin_data_dir(parent)?;
+                        let work = parent.join("sing-box");
+                        Ok((dir, secure, work))
+                    }).inspect_err(|error| platform::show_startup_error(error))?;
+                    paths.work = work;
+                    if platform::check_write_target(&paths.store).is_ok() {
+                        Store::migrate(&paths.store, &secure.join("store.bin"));
                     }
+                    paths.store = secure.join("store.bin");
+                    paths.proxy_marker = secure.join("proxy-backup.json");
+                    paths.data = secure;
                     paths.core = dir;
                     cores::install(&paths.core).err()
                 }
-                Some(Err(e)) => Some(e),
+                #[cfg(not(windows))]
+                Some(_) => unreachable!("Embedding cores is Windows-only"),
             };
             if let Some(e) = &core_error {
                 logs.lock().unwrap().push(format!("[app] {e}"));
             }
-            // Recover the user's proxy settings if we crashed while connected (also from a backup
-            // an earlier version left in the old data folder).
-            for marker in legacy_marker.iter().chain([&paths.proxy_marker]) {
-                if let Err(e) = proxy::restore(marker) {
-                    logs.lock().unwrap().push(format!("[app] {e}"));
-                }
+            // Recover only from the current data directory.
+            if let Err(e) = proxy::restore(&paths.proxy_marker) {
+                logs.lock().unwrap().push(format!("[app] {e}"));
             }
             // Kill switch rules left by a crash keep blocking until the user reconnects or unblocks.
             let blocked = firewall::recover();
@@ -978,6 +1030,10 @@ pub fn run() {
             }
             let recovery_error = absolute::recover(&paths.data.join("absolute-backup.json")).err();
             let store = Store::load(&paths.store);
+            let invalid = store.profiles.iter().filter(|p| p.validated().is_err()).count();
+            if invalid != 0 {
+                logs.lock().unwrap().push(format!("[app] {invalid} saved profile(s) have invalid or unsupported settings. They stay in the library and cannot start a core."));
+            }
             #[cfg(not(windows))]
             if store::uses_file_key() {
                 logs.lock().unwrap().push("[app] Store encryption uses a local key file. Keep it separate from store backups.".into());
@@ -1055,6 +1111,7 @@ pub fn run() {
             check_connection,
             connection_info,
             socks_url,
+            http_url,
             open_link,
             get_logs,
             clear_logs,

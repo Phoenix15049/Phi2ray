@@ -175,6 +175,78 @@ mod imp {
         }
     }
 
+    /// Permit elevated writes only below directories owned and writable by trusted identities.
+    pub fn check_admin_entry(path: &std::path::Path) -> Result<(), String> {
+        use windows_sys::Win32::Security::{
+            GetAce, IsWellKnownSid, WinBuiltinAdministratorsSid, WinLocalSystemSid,
+            ACCESS_ALLOWED_ACE, ACE_HEADER, DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PSID,
+        };
+        use windows_sys::Win32::Security::Authorization::{
+            ConvertStringSidToSidW, GetNamedSecurityInfoW, SE_FILE_OBJECT,
+        };
+
+        super::check_write_target(path)?;
+        let fail = || format!("Windows permissions for {} do not allow safe administrator access.", path.display());
+        const WRITE_RIGHTS: u32 = 0x500d_0156; // generic write/all and file write, delete, DAC and owner rights
+        const INHERIT_ONLY: u8 = 0x08;
+        let wide = |value: &OsStr| value.encode_wide().chain(Some(0)).collect::<Vec<_>>();
+        let name = wide(path.as_os_str());
+        let installer_sid = wide(OsStr::new("S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"));
+        unsafe {
+            let mut owner = null_mut();
+            let mut acl = null_mut();
+            let mut descriptor = null_mut();
+            let mut installer = null_mut();
+            let status = GetNamedSecurityInfoW(name.as_ptr(), SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, &mut owner, null_mut(),
+                &mut acl, null_mut(), &mut descriptor);
+            let installer_ok = ConvertStringSidToSidW(installer_sid.as_ptr(), &mut installer) != 0;
+            let trusted = |sid: PSID| !sid.is_null() && (
+                IsWellKnownSid(sid, WinBuiltinAdministratorsSid) != 0 || IsWellKnownSid(sid, WinLocalSystemSid) != 0
+                    || (installer_ok && windows_sys::Win32::Security::EqualSid(sid, installer) != 0)
+            );
+            let ok = status == 0 && !acl.is_null() && trusted(owner)
+                && (0..u32::from((*acl).AceCount)).all(|index| {
+                    let mut ace: *mut c_void = null_mut();
+                    if GetAce(acl, index, &mut ace) == 0 || ace.is_null() { return false; }
+                    let header = &*ace.cast::<ACE_HEADER>();
+                    if header.AceFlags & INHERIT_ONLY != 0 { return true; }
+                    match header.AceType {
+                        0 => {
+                            let ace = &*ace.cast::<ACCESS_ALLOWED_ACE>();
+                            ace.Mask & WRITE_RIGHTS == 0 || trusted(std::ptr::addr_of!(ace.SidStart).cast_mut().cast())
+                        }
+                        1 => true, // Ordinary deny ACE.
+                        _ => false,
+                    }
+                });
+            LocalFree(descriptor);
+            LocalFree(installer);
+            if ok { Ok(()) } else { Err(fail()) }
+        }
+    }
+
+    pub fn create_admin_directory(path: &std::path::Path) -> Result<(), String> {
+        let parent = path.parent().ok_or("Missing administrator directory parent.")?;
+        for ancestor in parent.ancestors().take_while(|p| p.file_name().is_some()) {
+            check_admin_entry(ancestor)?;
+        }
+        if let Err(e) = std::fs::create_dir(path) {
+            if e.kind() != std::io::ErrorKind::AlreadyExists || !path.is_dir() {
+                return Err(format!("Cannot create {}: {e}", path.display()));
+            }
+        }
+        check_admin_entry(path)
+    }
+
+    pub fn show_startup_error(error: &str) {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+        let title: Vec<u16> = "Phi2ray".encode_utf16().chain(Some(0)).collect();
+        let message: Vec<u16> = format!("Could not open Phi2ray's protected data folder.\n\n{error}")
+            .encode_utf16().chain(Some(0)).collect();
+        unsafe { MessageBoxW(null_mut(), message.as_ptr(), title.as_ptr(), MB_OK | MB_ICONERROR) };
+    }
+
     /// Programs currently running, one entry per executable, without Windows' own components.
     pub fn running_apps() -> Vec<super::RunningApp> {
         use windows_sys::Win32::System::Diagnostics::ToolHelp::{
@@ -266,8 +338,11 @@ pub fn check_write_target(path: &std::path::Path) -> Result<(), String> {
             m.file_type().is_symlink()
         })
     };
-    let dir = path.parent().unwrap_or(path);
-    if is_link(dir) || is_link(path) {
+    #[cfg(windows)]
+    let linked = path.ancestors().any(is_link);
+    #[cfg(not(windows))]
+    let linked = path.parent().is_some_and(is_link) || is_link(path);
+    if linked {
         return Err(format!("Refusing to write {}: it points somewhere else (a link).", path.display()));
     }
     Ok(())

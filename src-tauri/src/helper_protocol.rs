@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Bumped when a request or message changes in a way the other side can't read.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 /// Largest request accepted: a config, with room to spare.
 pub const MAX_REQUEST: u64 = 8 * 1024 * 1024;
 /// The VPN adapter's name.
@@ -49,6 +49,7 @@ pub enum Command {
     StopTest { test: u64 },
     KillSwitch { on: bool, allow_lan: bool },
     VerifyKillSwitch,
+    VerifyXrayListeners { ports: Vec<u16> },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -158,7 +159,7 @@ pub fn check_tun_config(config: &Value, core_uid: u32) -> Result<(), String> {
     keys(
         "inbound",
         tun,
-        &["type", "tag", "interface_name", "address", "mtu", "auto_route", "strict_route", "route_exclude_address", "stack", "exclude_uid"],
+        &["type", "tag", "interface_name", "address", "mtu", "auto_route", "strict_route", "stack", "exclude_uid"],
     )?;
     if tun["type"] != "tun" || tun["interface_name"] != TUN_NAME {
         return Err("unexpected inbound".into());
