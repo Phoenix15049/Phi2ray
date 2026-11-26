@@ -1,24 +1,41 @@
 # Code signing policy
 
-Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by
-[SignPath Foundation](https://signpath.org)
+Windows releases can use [SignPath.io](https://about.signpath.io) with a trusted code-signing
+certificate. Eligible projects can apply for a certificate from [SignPath Foundation](https://signpath.org/apply).
+The publisher Windows verifies is the certificate's subject. **Properties → Details** shows
+the developer name stored in the file metadata. **Properties → Digital Signatures** shows
+who signed the file.
 
-> This applies once signing is approved and active. A release is signed if its exe shows
-> SignPath Foundation as publisher.
+For releases signed with the Foundation's certificate:
 
-For a tagged build, configure the repository Actions variables `SIGNPATH_ORGANIZATION_ID`,
-`SIGNPATH_PROJECT_SLUG` and `SIGNPATH_POLICY_SLUG` and the Actions secret
-`SIGNPATH_API_TOKEN`. The Windows job requires a valid Authenticode signature and a timestamp
-when SignPath is configured. Set the repository Actions variable
-`ALLOW_UNSIGNED_WINDOWS_RELEASE=true` only when intentionally releasing without SignPath.
-Manual workflow runs produce a separate unsigned test artifact.
+> Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org)
+
+## Configure signing on GitHub
+
+1. Set up a SignPath project and signing policy with a trusted code-signing certificate.
+   Use the repository's [artifact configuration](.signpath/artifact-configuration.xml) and
+   follow the [GitHub integration guide](https://docs.signpath.io/trusted-build-systems/github).
+2. In the GitHub repository, open **Settings → Secrets and variables → Actions**. Create
+   `SIGNPATH_ORGANIZATION_ID`, `SIGNPATH_PROJECT_SLUG` and `SIGNPATH_POLICY_SLUG` under
+   **Variables**. Add `SIGNPATH_API_TOKEN` under **Secrets**, using a SignPath identity allowed
+   to submit signing requests for that policy.
+3. Run the Release workflow from `main` and check the **Windows signing** summary. This
+   checks that the settings are present and produces an unsigned test artifact. A tagged
+   run submits the actual signing request. Approve it in SignPath if the policy requires
+   approval. SignPath Foundation requires approval for every release. The workflow verifies
+   the Authenticode signature and timestamp before drafting the release.
+
+For an intentionally unsigned release, remove incomplete SignPath settings and set the
+repository Actions variable `ALLOW_UNSIGNED_WINDOWS_RELEASE` to `true`. The release notes
+identify the unsigned executable. Microsoft Defender SmartScreen may still warn on first
+download even for a correctly signed release. [Microsoft's signing and reputation guidance](https://learn.microsoft.com/windows/apps/package-and-deploy/smartscreen-reputation)
 
 ## What gets signed
 
 Only `Phi2ray-<version>-windows-x64.exe`, built by the
 [release workflow](.github/workflows/release.yml) on GitHub-hosted runners from the tagged
-commit. Every release is approved by hand before it's signed. The Linux packages aren't signed;
-they come from the same workflow, with their SHA-256 and a build attestation in the release.
+commit. The signing policy determines approval. Linux packages come from the same workflow
+with SHA-256 checksums and a build attestation in the release.
 
 The exe carries the unmodified upstream cores listed in
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) (Xray-core and sing-box). They aren't signed by

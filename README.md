@@ -52,6 +52,8 @@ between that sets them up safely, watches them, and stays out of your way.
 - The Windows kill switch uses the TUN interface identity and limits DHCP to the Windows
   DHCP service. Subscription refresh cannot switch to a direct connection during reconnects.
 - AppImage VPN mode uses the same-version helper installed by a Linux package.
+- Windows executables include full product and file version information. GitHub Actions checks
+  the executable's metadata and reports whether release signing is configured.
 
 ## What's new in 0.2.2
 
@@ -83,8 +85,12 @@ Linux builds are for 64-bit Intel and AMD and need Ubuntu 22.04, Debian 12, Fedo
 Run the exe. Windows asks for administrator rights, which the VPN adapter and the firewall rules
 need. There's nothing to install.
 
-The exe isn't code-signed yet, so Windows may call it an "unrecognized app". Click
-*More info → Run anyway*.
+Check the release notes for the Windows executable's signing status. In File Explorer, the
+executable's **Properties → Details** lists the product, version and developer. For a signed
+build, **Properties → Digital Signatures** displays the certificate's publisher. Windows may
+show **Unknown publisher** for an unsigned file. SmartScreen can also warn about a newly
+released signed file while it builds reputation. Verify the download before running it.
+[Microsoft's SmartScreen guidance](https://learn.microsoft.com/windows/apps/package-and-deploy/smartscreen-reputation)
 
 ### Linux
 
@@ -299,24 +305,31 @@ package first on Linux so the helper is there.
 
 ## Build a GitHub release
 
-The [Release workflow](.github/workflows/release.yml) checks the version across the manifests
-and lockfiles, audits dependencies, and verifies the pinned core hashes. For a trial build after
-pushing the branch, choose **Actions → Release → Run workflow**. Download the Windows and Linux
-artifacts from that run.
+Commit and push the final changes to `main`. In GitHub, select **Actions → Release → Run
+workflow**, choose `main`, then open the run's **Summary**. The **Windows signing** summary
+shows which signing settings are present for a tagged run. The trial produces an unsigned
+Windows executable and Linux build artifacts and skips `publish`.
 
-Before tagging, configure SignPath as described in [Code signing](CODE_SIGNING.md). To publish an
-unsigned Windows executable deliberately, set the repository Actions variable
-`ALLOW_UNSIGNED_WINDOWS_RELEASE` to `true`. A configured signing job must return a valid,
-timestamped executable.
+For a verified Windows publisher, configure SignPath as described in [Code
+signing](CODE_SIGNING.md) before pushing the tag. To release an unsigned Windows executable
+instead, use **Settings → Secrets and variables → Actions → Variables → New repository
+variable** and set `ALLOW_UNSIGNED_WINDOWS_RELEASE` to `true`. SignPath settings take
+precedence and must be complete when present.
 
 Run these commands from the final commit on `main` after the trial build succeeds.
 
 ```bash
 node scripts/check-release-version.mjs
-git push origin main
 git tag -a v0.2.3 -m "Phi2ray 0.2.3"
-git push origin v0.2.3
+git push origin refs/tags/v0.2.3
 ```
+
+If a failed run already used the tag and no release was published, check which tag object and
+commit the remote currently points to with `git ls-remote origin "refs/tags/v0.2.3*"`. From
+the corrected commit, recreate the local tag with `git tag -fa v0.2.3 -m "Phi2ray 0.2.3"`.
+Push the ref with `git push --force-with-lease=refs/tags/v0.2.3:OLD_TAG_OBJECT origin refs/tags/v0.2.3`,
+replacing `OLD_TAG_OBJECT` with the hash from the row without `^{}`. Re-running the old
+workflow would build the old commit.
 
 After the tagged run succeeds, open **Releases**, review the draft and its files and select
 **Publish release**. If SignPath is configured, approve its request during the Windows job.
@@ -328,11 +341,14 @@ checksums. Arch packaging verifies the SHA-256 of the Debian package from the sa
 Releases are built by GitHub Actions straight from the tagged commit
 ([workflow](.github/workflows/release.yml)), never on my own computer, and only if the dependency
 audits pass and every core matches its pinned hash. Compare a file's SHA-256 with the one in the
-release notes, or check its signed build attestation:
+release notes or verify its build attestation.
 
 ```bash
 gh attestation verify <file> -R Phoenix15049/Phi2ray
 ```
+
+For a release announced as signed, run `Get-AuthenticodeSignature .\Phi2ray-0.2.3-windows-x64.exe`
+in PowerShell. Check for `Valid` and compare the certificate's subject with the expected publisher.
 
 ## Things people ask
 

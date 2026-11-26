@@ -10,6 +10,11 @@ readme = "../README.md"
 keywords = ["xray", "vless", "vpn", "proxy", "tauri"]
 edition = "2021"
 
+[package.metadata.tauri-winres]
+OriginalFilename = "phi2ray.exe"
+InternalName = "phi2ray"
+Comments = "Portable Xray client for Windows with VPN mode, a kill switch, and split tunnelling. MIT license. https://github.com/Phoenix15049/Phi2ray"
+
 [lib]
 name = "phi2ray_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]

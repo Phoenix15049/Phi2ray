@@ -42,6 +42,8 @@
       "icons/icon.ico"
     ],
     "publisher": "M.R. Yadollahi",
+    "homepage": "https://github.com/Phoenix15049/Phi2ray",
+    "license": "MIT",
     "copyright": "Copyright © 2026 M.R. Yadollahi. MIT License.",
     "category": "Utility",
     "shortDescription": "Secure Xray client with VPN mode, kill switch and split tunnelling",

@@ -30,6 +30,8 @@ env:
 jobs:
   checks:
     runs-on: ubuntu-latest
+    outputs:
+      signing_mode: ${{ steps.signing.outputs.mode }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -42,23 +44,44 @@ jobs:
         run: node scripts/check-release-version.mjs
 
       - name: Check Windows signing policy
-        if: github.event_name == 'push' && github.ref_type == 'tag'
+        id: signing
+        shell: bash
         env:
-          PROJECT: ${{ vars.SIGNPATH_PROJECT_SLUG }}
-          ORGANIZATION: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
-          POLICY: ${{ vars.SIGNPATH_POLICY_SLUG }}
-          SIGNING_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
-          ALLOW_UNSIGNED: ${{ vars.ALLOW_UNSIGNED_WINDOWS_RELEASE }}
+          TAGGED_RELEASE: ${{ github.event_name == 'push' && github.ref_type == 'tag' }}
+          SIGNPATH_PROJECT_SLUG: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          SIGNPATH_ORGANIZATION_ID: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          SIGNPATH_POLICY_SLUG: ${{ vars.SIGNPATH_POLICY_SLUG }}
+          SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+          ALLOW_UNSIGNED_WINDOWS_RELEASE: ${{ vars.ALLOW_UNSIGNED_WINDOWS_RELEASE }}
         run: |
-          if [ -n "$PROJECT$ORGANIZATION$POLICY" ]; then
-            if [ -z "$PROJECT" ] || [ -z "$ORGANIZATION" ] || [ -z "$POLICY" ] || [ -z "$SIGNING_TOKEN" ]; then
-              echo "::error::Incomplete SignPath configuration. Configure all three variables and the API token secret."
-              exit 1
+          missing=()
+          for key in SIGNPATH_PROJECT_SLUG SIGNPATH_ORGANIZATION_ID SIGNPATH_POLICY_SLUG SIGNPATH_API_TOKEN; do
+            if [[ -z "${!key}" ]]; then missing+=("$key"); fi
+          done
+
+          if [[ ${#missing[@]} == 0 ]]; then
+            mode=signed
+            message="SignPath settings are present. The tagged run will request a signature."
+          elif [[ ${#missing[@]} == 4 && "$ALLOW_UNSIGNED_WINDOWS_RELEASE" == true ]]; then
+            mode=unsigned
+            message="This repository explicitly allows an unsigned Windows release."
+          else
+            mode=blocked
+            if [[ ${#missing[@]} == 4 ]]; then
+              message="Configure SignPath for a verified publisher. To release unsigned, set ALLOW_UNSIGNED_WINDOWS_RELEASE=true in Settings > Secrets and variables > Actions > Variables."
+            else
+              message="Incomplete SignPath configuration. Missing: ${missing[*]}."
             fi
-          elif [ "$ALLOW_UNSIGNED" != "true" ]; then
-            echo "::error::Configure SignPath or explicitly set ALLOW_UNSIGNED_WINDOWS_RELEASE=true for an unsigned release."
+          fi
+          printf '### Windows signing\n\n%s\n' "$message" >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$TAGGED_RELEASE" != true ]]; then
+            mode=test
+            echo "This trial build produces unsigned Windows artifacts."
+          elif [[ "$mode" == blocked ]]; then
+            echo "::error::$message"
             exit 1
           fi
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
 
       - name: Audit dependencies
         run: |
@@ -76,6 +99,7 @@ jobs:
       contents: read
     outputs:
       signed: ${{ steps.final.outputs.signed }}
+      foundation: ${{ steps.final.outputs.foundation }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -137,7 +161,7 @@ jobs:
       # stay unsigned.
       - name: Upload the unsigned exe
         id: unsigned
-        if: github.event_name == 'push' && github.ref_type == 'tag' && vars.SIGNPATH_PROJECT_SLUG != ''
+        if: needs.checks.outputs.signing_mode == 'signed'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: unsigned-windows-exe
@@ -145,7 +169,7 @@ jobs:
           if-no-files-found: error
 
       - name: Sign the exe
-        if: github.event_name == 'push' && github.ref_type == 'tag' && vars.SIGNPATH_PROJECT_SLUG != ''
+        if: needs.checks.outputs.signing_mode == 'signed'
         uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3.0
         with:
           api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
@@ -160,24 +184,29 @@ jobs:
           parameters: |
             version: ${{ toJSON(env.APP_VERSION) }}
 
-      - name: Check the signature
+      - name: Check Windows signature and metadata
         id: final
         shell: pwsh
         env:
-          SIGNING_REQUIRED: ${{ github.event_name == 'push' && github.ref_type == 'tag' && vars.SIGNPATH_PROJECT_SLUG != '' }}
+          SIGNING_MODE: ${{ needs.checks.outputs.signing_mode }}
         run: |
           $exe = "release/$env:EXE_NAME"
-          $signed = $env:SIGNING_REQUIRED -eq 'true'
+          if ($env:SIGNING_MODE -notin @('test', 'signed', 'unsigned')) { throw "Missing Windows signing decision." }
+          $signed = $env:SIGNING_MODE -eq 'signed'
+          $foundation = $false
           if ($signed) {
             if (!(Test-Path -LiteralPath $exe -PathType Leaf)) { throw "SignPath did not return the expected executable." }
             $signature = Get-AuthenticodeSignature $exe
             if ($signature.Status -ne 'Valid' -or !$signature.SignerCertificate -or !$signature.TimeStamperCertificate) {
               throw "The executable needs a valid, timestamped Authenticode signature: $($signature.StatusMessage)"
             }
+            $foundation = $signature.SignerCertificate.GetNameInfo('SimpleName', $false) -eq 'SignPath Foundation'
           } else {
             Copy-Item "unsigned/$env:EXE_NAME" $exe
           }
+          & scripts/check-windows-metadata.ps1 -Path $exe
           "signed=$($signed.ToString().ToLower())" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "foundation=$($foundation.ToString().ToLower())" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -364,6 +393,7 @@ jobs:
           TAG: ${{ github.ref_name }}
           ATTESTED: ${{ github.event.repository.visibility == 'public' }}
           SIGNED: ${{ needs.windows.outputs.signed }}
+          FOUNDATION: ${{ needs.windows.outputs.foundation }}
         run: |
           commit="$(git rev-parse HEAD)"
           base="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG"
@@ -407,7 +437,10 @@ jobs:
             echo "Cores inside: Xray $XRAY_VERSION, sing-box $SING_BOX_VERSION"
             echo
             if [ "$SIGNED" = true ]; then
-              echo "Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org)"
+              echo "The Windows executable has a verified and timestamped Authenticode signature via [SignPath.io](https://about.signpath.io). Check its Digital Signatures tab to see the certificate subject."
+              if [ "$FOUNDATION" = true ]; then
+                echo "Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org)"
+              fi
             else
               echo "The Windows executable in this release is unsigned. Verify its SHA-256 and build attestation before running it."
             fi
